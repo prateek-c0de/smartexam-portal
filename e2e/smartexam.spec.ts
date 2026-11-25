@@ -227,4 +227,51 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
     await studentCtx.close();
     await teacherCtx.close();
   });
+
+  test('3. Every new teacher and student signs in with their own email & password across sessions', async ({
+    page,
+  }) => {
+    // New Teacher signs in directly with their own email & password
+    await page.goto('/');
+    await page.getByRole('button', { name: /Teacher Portal/i }).click();
+    await page.fill('input[type="email"]', 'dr.patel@college.edu');
+    await page.fill('input[type="password"]', 'MyTeacherPass99');
+    await page.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(page.getByRole('heading', { name: /Exam Management Dashboard/i })).toBeVisible();
+
+    // Sign out -> wrong password fails -> exact password succeeds again
+    await page.locator('button[title="Sign out"]').click();
+    await page.getByRole('button', { name: /Teacher Portal/i }).click();
+    await page.fill('input[type="email"]', 'dr.patel@college.edu');
+    await page.fill('input[type="password"]', 'WrongPass111');
+    await page.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(page.getByRole('alert')).toContainText(/Invalid email or password/i);
+
+    await page.fill('input[type="password"]', 'MyTeacherPass99');
+    await page.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(page.getByRole('heading', { name: /Exam Management Dashboard/i })).toBeVisible();
+    await page.locator('button[title="Sign out"]').click();
+
+    // New Student signs in directly with their own email & password
+    await page.getByRole('button', { name: /Student Portal/i }).click();
+    await page.fill('input[type="email"]', 'priya.sharma@college.edu');
+    await page.fill('input[type="password"]', 'PriyaPass88');
+    await page.getByRole('button', { name: /Sign In as Student/i }).click();
+    await expect(page.getByRole('heading', { name: /Student Examination Portal/i })).toBeVisible();
+
+    // Sign out -> student cannot sign into Teacher Portal -> signs back into Student Portal with own password
+    await page.locator('button[title="Sign out"]').click();
+    await page.getByRole('button', { name: /Teacher Portal/i }).click();
+    await page.fill('input[type="email"]', 'priya.sharma@college.edu');
+    await page.fill('input[type="password"]', 'PriyaPass88');
+    await page.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(page.getByRole('alert')).toContainText(/Student account/i);
+
+    await page.getByRole('button', { name: /Back to Home/i }).click();
+    await page.getByRole('button', { name: /Student Portal/i }).click();
+    await page.fill('input[type="email"]', 'priya.sharma@college.edu');
+    await page.fill('input[type="password"]', 'PriyaPass88');
+    await page.getByRole('button', { name: /Sign In as Student/i }).click();
+    await expect(page.getByRole('heading', { name: /Student Examination Portal/i })).toBeVisible();
+  });
 });

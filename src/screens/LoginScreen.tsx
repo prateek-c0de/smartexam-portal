@@ -98,18 +98,6 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
           institution,
         });
 
-        if (res.pendingTeacherApproval) {
-          setInfoMessage(
-            res.requiresEmailVerification
-              ? 'Verification email sent. Confirm your email address; an administrator must also approve faculty access before you can sign in to the Teacher Portal.'
-              : 'Faculty registration submitted. Your account awaits administrator approval before Teacher Portal access is enabled.'
-          );
-          setMode('signin');
-          setPassword('');
-          setConfirmPassword('');
-          return;
-        }
-
         if (res.requiresEmailVerification) {
           setInfoMessage(
             'Account created! Check your inbox and click the verification link before signing in.'
@@ -210,7 +198,7 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
                 : mode === 'register'
                   ? isStudent
                     ? 'Create Student Account'
-                    : 'Request Faculty Account'
+                    : 'Create Faculty Account'
                   : isStudent
                     ? 'Student Sign In'
                     : 'Faculty Sign In'}
@@ -220,11 +208,11 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
                 ? 'Enter your registered email address to receive a password reset link.'
                 : mode === 'register'
                   ? isStudent
-                    ? 'Register with your university email to attend examinations.'
-                    : 'Faculty accounts require administrator verification before activation.'
+                    ? 'Register with your own email and password to attend examinations.'
+                    : 'Register with your own faculty email and password to manage examinations.'
                   : isStudent
-                    ? 'Enter your university credentials to access your exams.'
-                    : 'Sign in to manage exams and view student results.'}
+                    ? 'Sign in with your own student email and password.'
+                    : 'Sign in with your own faculty email and password.'}
             </p>
 
             {error && (
@@ -398,27 +386,32 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
                     ? 'Send Reset Link'
                     : mode === 'register'
                       ? isStudent
-                        ? 'Register as Student'
-                        : 'Submit Faculty Request'
+                        ? 'Create Student Account'
+                        : 'Create Faculty Account'
                       : `Sign In as ${isStudent ? 'Student' : 'Teacher'}`}
               </Button>
             </form>
 
-            <div className="mt-6 p-4 rounded-xl bg-neutral-50 border border-neutral-200 text-center">
+            <div className="mt-6 p-4 rounded-xl bg-neutral-50 border border-neutral-200 text-center space-y-1">
               {mode === 'signin' ? (
-                <p className="text-xs text-neutral-600">
-                  {isStudent ? 'Don’t have a student account?' : 'Need faculty portal access?'}{' '}
-                  <button
-                    type="button"
-                    onClick={() => switchMode('register')}
-                    className="font-semibold text-brand-600 hover:text-brand-700"
-                  >
-                    {isStudent ? 'Create Account' : 'Request Provisioning'}
-                  </button>
-                </p>
+                <>
+                  <p className="text-xs text-neutral-600">
+                    Want to customize your display name?{' '}
+                    <button
+                      type="button"
+                      onClick={() => switchMode('register')}
+                      className="font-semibold text-brand-600 hover:text-brand-700"
+                    >
+                      Create Account
+                    </button>
+                  </p>
+                  <p className="text-[11px] text-neutral-400">
+                    Each email is bound to your chosen password on first sign-in.
+                  </p>
+                </>
               ) : (
                 <p className="text-xs text-neutral-600">
-                  Remembered your credentials?{' '}
+                  Already have an account?{' '}
                   <button
                     type="button"
                     onClick={() => switchMode('signin')}

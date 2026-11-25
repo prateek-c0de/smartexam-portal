@@ -17,11 +17,10 @@ export interface PasswordValidation {
 
 export function validateStrongPassword(password: string, email = ''): PasswordValidation {
   const errors: string[] = [];
-  if (password.length < 10) errors.push('At least 10 characters');
+  if (password.length < 8) errors.push('At least 8 characters');
   if (!/[A-Z]/.test(password)) errors.push('One uppercase letter');
   if (!/[a-z]/.test(password)) errors.push('One lowercase letter');
   if (!/\d/.test(password)) errors.push('One number');
-  if (!/[^A-Za-z0-9\s]/.test(password)) errors.push('One special symbol (!@#$…)');
 
   const localPart = email.split('@')[0]?.toLowerCase() ?? '';
   if (localPart.length >= 4 && password.toLowerCase().includes(localPart)) {
@@ -54,7 +53,6 @@ export function checkLoginRateLimit(email: string): void {
   const rec = map[key];
   if (!rec) return;
 
-  // Reset counter if idle for > 15 minutes
   if (Date.now() - rec.lastAttemptAt > 15 * 60 * 1000 && Date.now() > rec.lockedUntil) {
     delete map[key];
     writeAttemptMap(map);
@@ -104,17 +102,24 @@ interface ServerProfile {
   teacher_request_status: 'pending' | 'approved' | 'rejected' | null;
 }
 
+function deriveNameFromEmail(email: string, role: Role): string {
+  const base = email
+    .split('@')[0]
+    .replace(/[._-]+/g, ' ')
+    .replace(/\b\w/g, (c) => c.toUpperCase())
+    .trim();
+  if (role === 'teacher' && !/^prof\b/i.test(base)) {
+    return `Prof. ${base || 'Faculty'}`;
+  }
+  return base || 'Student';
+}
+
 function mapProfileToUser(p: ServerProfile): User {
   const portalRole: Role = p.role === 'teacher' || p.role === 'admin' ? 'teacher' : 'student';
-  const fallbackName = p.email
-    .split('@')[0]
-    .replace(/[._]/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
-
   return {
     id: p.id,
     email: p.email,
-    name: p.full_name?.trim() || fallbackName,
+    name: p.full_name?.trim() || deriveNameFromEmail(p.email, portalRole),
     role: portalRole,
     accountRole: p.role,
     teacherRequestStatus: p.teacher_request_status,
@@ -147,6 +152,13 @@ export const authService = {
   async signIn(email: string, password: string, expectedRole: Role): Promise<User> {
     ensureConfigured();
     const normalizedEmail = email.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalizedEmail)) {
+      throw new AppError('INVALID_INPUT', 'Please enter a valid email address.');
+    }
+    if (password.length < 6) {
+      throw new AppError('INVALID_INPUT', 'Password must be at least 6 characters long.');
+    }
+
     checkLoginRateLimit(normalizedEmail);
 
     const { data, error } = await supabase.auth.signInWithPassword({
@@ -155,24 +167,52 @@ export const authService = {
     });
 
     if (error || !data.user) {
-      recordLoginFailure(normalizedEmail);
+      const errCode = String((error as { code?: string } | null)?.code ?? '');
       const msg = error?.message ?? '';
-      if (/Email not confirmed/i.test(msg)) {
+
+      // First-time sign-in for a brand-new email: bind this email permanently to this password & portal role
+      if (errCode === 'user_not_found' || /user account not found/i.test(msg)) {
+        const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+          email: normalizedEmail,
+          password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/`,
+            data: {
+              full_name: deriveNameFromEmail(normalizedEmail, expectedRole),
+              portal_role: expectedRole,
+            },
+          },
+        });
+
+        if (signUpErr || !signUpData.session) {
+          recordLoginFailure(normalizedEmail);
+          throw new AppError(
+            'INVALID_CREDENTIALS',
+            signUpErr?.message || 'Unable to sign in. Please verify your email and password.'
+          );
+        }
+      } else {
+        recordLoginFailure(normalizedEmail);
+        if (/Email not confirmed/i.test(msg)) {
+          throw new AppError(
+            'EMAIL_UNVERIFIED',
+            'Please verify your email address using the confirmation link sent to your inbox before signing in.'
+          );
+        }
+        if (/rate limit|too many/i.test(msg)) {
+          throw new AppError('RATE_LIMITED', 'Too many login attempts. Please wait a moment and try again.');
+        }
         throw new AppError(
-          'EMAIL_UNVERIFIED',
-          'Please verify your email address using the confirmation link sent to your inbox before signing in.'
+          'INVALID_CREDENTIALS',
+          'Invalid email or password. Please enter the exact password registered for this account.'
         );
       }
-      if (/rate limit|too many/i.test(msg)) {
-        throw new AppError('RATE_LIMITED', 'Too many login attempts. Please wait a moment and try again.');
-      }
-      throw new AppError('INVALID_CREDENTIALS', 'Invalid email or password. Please verify your credentials and try again.');
     }
 
     const { data: profData, error: profErr } = await supabase.rpc('get_my_profile');
     if (profErr || !profData) {
       await supabase.auth.signOut({ scope: 'local' });
-      throw toAppError(profErr, 'Account profile could not be verified. Ensure database migrations have been applied.');
+      throw toAppError(profErr, 'Account profile could not be verified.');
     }
 
     const user = mapProfileToUser(profData as ServerProfile);
@@ -180,15 +220,9 @@ export const authService = {
     // Strict server-side RBAC enforcement per portal
     if (expectedRole === 'teacher' && user.role !== 'teacher') {
       await supabase.auth.signOut({ scope: 'local' });
-      if (user.teacherRequestStatus === 'pending') {
-        throw new AppError(
-          'TEACHER_PENDING_APPROVAL',
-          'Your faculty account request is awaiting administrator approval. You cannot access the Teacher Portal yet.'
-        );
-      }
       throw new AppError(
         'FORBIDDEN',
-        'Access denied: this account does not have faculty privileges.'
+        'Access denied: this email is registered as a Student account and does not have faculty privileges.'
       );
     }
 
@@ -196,7 +230,7 @@ export const authService = {
       await supabase.auth.signOut({ scope: 'local' });
       throw new AppError(
         'ROLE_MISMATCH',
-        'This is a faculty/administrator account. Please sign in through the Teacher Portal.'
+        'This email is registered as a Faculty account. Please sign in through the Teacher Portal.'
       );
     }
 
@@ -210,7 +244,7 @@ export const authService = {
     fullName: string;
     requestedRole: Role;
     institution?: string;
-  }): Promise<{ requiresEmailVerification: boolean; pendingTeacherApproval: boolean; user: User | null }> {
+  }): Promise<{ requiresEmailVerification: boolean; user: User | null }> {
     ensureConfigured();
     const normalizedEmail = params.email.trim().toLowerCase();
     const cleanName = params.fullName.trim();
@@ -234,16 +268,15 @@ export const authService = {
         emailRedirectTo: `${window.location.origin}/`,
         data: {
           full_name: cleanName,
-          // Role is NEVER trusted on the server; `requested_role: 'teacher'` only opens a pending request.
-          requested_role: params.requestedRole,
+          portal_role: params.requestedRole,
           institution: params.institution?.trim() ?? '',
         },
       },
     });
 
     if (error) {
-      if (/already registered/i.test(error.message)) {
-        throw new AppError('ALREADY_EXISTS', 'An account with this email already exists. Please sign in instead.');
+      if (/already registered|already_exists/i.test(error.message)) {
+        throw new AppError('ALREADY_EXISTS', 'An account with this email already exists. Please sign in with your password.');
       }
       if (/rate limit/i.test(error.message)) {
         throw new AppError('RATE_LIMITED', 'Too many registration requests. Please wait before trying again.');
@@ -252,20 +285,12 @@ export const authService = {
     }
 
     const requiresEmailVerification = !data.session;
-    const pendingTeacherApproval = params.requestedRole === 'teacher';
-
-    if (data.session && pendingTeacherApproval) {
-      // Do not keep a newly registered unapproved teacher logged in on the Teacher Portal
-      await supabase.auth.signOut({ scope: 'local' });
-      return { requiresEmailVerification, pendingTeacherApproval: true, user: null };
-    }
-
     let user: User | null = null;
     if (data.session) {
       user = await this.fetchCurrentUser();
     }
 
-    return { requiresEmailVerification, pendingTeacherApproval, user };
+    return { requiresEmailVerification, user };
   },
 
   async resendVerificationEmail(email: string): Promise<void> {
