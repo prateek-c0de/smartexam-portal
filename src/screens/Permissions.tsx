@@ -1,7 +1,12 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Button from '@/components/Button';
 import ExamHeader from '@/components/ExamHeader';
 import type { PermissionState, User } from '@/types';
+import {
+  requestCameraPermission,
+  requestMicrophonePermission,
+  stopStream,
+} from '@/utils/permissions';
 import {
   Camera,
   Mic,
@@ -16,17 +21,24 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 
+export interface GrantedMediaHandoff {
+  camera: PermissionState;
+  microphone: PermissionState;
+  screen: PermissionState;
+  screenStream: MediaStream | null;
+}
+
 interface PermissionsProps {
   user: User;
   step: number;
   stepLabels: string[];
-  onContinue: () => void;
+  onContinue: (handoff: GrantedMediaHandoff) => void;
   onBack: () => void;
   onLogout: () => void;
 }
 
 interface PermCheck {
-  key: string;
+  key: 'camera' | 'microphone' | 'screen';
   icon: typeof Camera;
   label: string;
   description: string;
@@ -46,53 +58,65 @@ export default function PermissionsScreen({
       key: 'camera',
       icon: Camera,
       label: 'Webcam Access',
-      description: 'Required for live face monitoring during the exam.',
+      description: 'Required for live face presence monitoring during the exam.',
       state: 'pending',
     },
     {
       key: 'microphone',
       icon: Mic,
       label: 'Microphone Access',
-      description: 'Required to detect voices and background audio.',
+      description: 'Required to detect sustained speech-band audio events.',
       state: 'pending',
     },
     {
       key: 'screen',
       icon: ScreenShare,
       label: 'Screen Sharing',
-      description: 'Required to monitor for tab switching and external apps.',
+      description: 'Required to authorize live screen monitoring during the exam.',
       state: 'pending',
     },
   ]);
   const [requesting, setRequesting] = useState<string | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const handedOffRef = useRef(false);
 
-  async function requestPermission(key: string) {
+  useEffect(() => {
+    return () => {
+      if (!handedOffRef.current) {
+        stopStream(screenStreamRef.current);
+        screenStreamRef.current = null;
+      }
+    };
+  }, []);
+
+  async function requestPermission(key: PermCheck['key']) {
     setRequesting(key);
     let result: PermissionState;
 
     if (key === 'camera') {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        stream.getTracks().forEach((t) => t.stop());
-        result = 'granted';
-      } catch {
-        result = 'denied';
-      }
+      result = await requestCameraPermission();
     } else if (key === 'microphone') {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((t) => t.stop());
-        result = 'granted';
-      } catch {
-        result = 'denied';
-      }
+      result = await requestMicrophonePermission();
     } else {
+      stopStream(screenStreamRef.current);
+      screenStreamRef.current = null;
       if (!navigator.mediaDevices?.getDisplayMedia) {
         result = 'unsupported';
       } else {
         try {
-          const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-          stream.getTracks().forEach((t) => t.stop());
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: { ideal: 6, max: 10 } },
+          });
+          screenStreamRef.current = stream;
+          const videoTrack = stream.getVideoTracks()[0];
+          if (videoTrack) {
+            videoTrack.onended = () => {
+              screenStreamRef.current = null;
+              setChecks((prev) =>
+                prev.map((c) => (c.key === 'screen' ? { ...c, state: 'pending' } : c))
+              );
+            };
+          }
           result = 'granted';
         } catch {
           result = 'denied';
@@ -104,12 +128,38 @@ export default function PermissionsScreen({
     setRequesting(null);
   }
 
+  function handleBack() {
+    stopStream(screenStreamRef.current);
+    screenStreamRef.current = null;
+    onBack();
+  }
+
+  function handleLogout() {
+    stopStream(screenStreamRef.current);
+    screenStreamRef.current = null;
+    onLogout();
+  }
+
+  function handleContinue() {
+    handedOffRef.current = true;
+    const byKey = Object.fromEntries(checks.map((c) => [c.key, c.state])) as Record<
+      PermCheck['key'],
+      PermissionState
+    >;
+    onContinue({
+      camera: byKey.camera,
+      microphone: byKey.microphone,
+      screen: byKey.screen,
+      screenStream: screenStreamRef.current,
+    });
+  }
+
   const allGranted = checks.every((c) => c.state === 'granted');
   const anyDenied = checks.some((c) => c.state === 'denied' || c.state === 'unsupported');
 
   return (
     <div className="min-h-screen bg-neutral-50">
-      <ExamHeader user={user} step={step} totalSteps={stepLabels.length} stepLabels={stepLabels} onLogout={onLogout} />
+      <ExamHeader user={user} step={step} totalSteps={stepLabels.length} stepLabels={stepLabels} onLogout={handleLogout} />
 
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
         <div className="mb-8 animate-slide-up">
@@ -154,7 +204,7 @@ export default function PermissionsScreen({
               </div>
 
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-bold text-neutral-900">{check.label}</p>
+                <p className="text-sm font-semibold text-neutral-900">{check.label}</p>
                 <p className="text-sm text-neutral-500">{check.description}</p>
               </div>
 
@@ -163,7 +213,7 @@ export default function PermissionsScreen({
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => requestPermission(check.key)}
+                    onClick={() => void requestPermission(check.key)}
                     disabled={requesting !== null}
                   >
                     {requesting === check.key ? (
@@ -186,7 +236,7 @@ export default function PermissionsScreen({
                     </div>
                     {check.state === 'denied' && (
                       <button
-                        onClick={() => requestPermission(check.key)}
+                        onClick={() => void requestPermission(check.key)}
                         className="p-1.5 rounded-lg text-neutral-400 hover:text-brand-600 hover:bg-brand-50 transition-colors"
                         title="Retry"
                       >
@@ -206,11 +256,11 @@ export default function PermissionsScreen({
             <div className="flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-warning-600 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="text-sm font-semibold text-warning-800">Permission Required</p>
+                <p className="text-sm font-semibold text-warning-800">Permission Notice</p>
                 <p className="text-sm text-warning-700 mt-1 leading-relaxed">
-                  Some permissions were denied. You can still continue, but the proctoring system
-                  may flag your session. To fix this, click the retry icon or update your browser
-                  site settings.
+                  Some permissions were denied or unavailable. If you have an approved accessibility
+                  accommodation you may continue; otherwise technical interruption events will be
+                  logged for instructor review. Click retry or update your browser site settings.
                 </p>
               </div>
             </div>
@@ -222,7 +272,7 @@ export default function PermissionsScreen({
             <div className="flex items-center gap-3">
               <CheckCircle2 className="h-6 w-6 text-success-600" />
               <p className="text-sm font-semibold text-success-800">
-                All permissions granted. You're ready for face verification.
+                All permissions granted. You're ready for camera & face presence verification.
               </p>
             </div>
           </div>
@@ -230,17 +280,17 @@ export default function PermissionsScreen({
 
         {/* Navigation */}
         <div className="mt-8 flex items-center justify-between">
-          <Button variant="ghost" onClick={onBack}>
+          <Button variant="ghost" onClick={handleBack}>
             <ArrowLeft className="h-4 w-4" />
             Back
           </Button>
           <Button
             size="lg"
-            onClick={onContinue}
+            onClick={handleContinue}
             disabled={checks.some((c) => c.state === 'pending')}
             className="group"
           >
-            Continue to Face Verification
+            Continue to Camera Check
             <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
           </Button>
         </div>

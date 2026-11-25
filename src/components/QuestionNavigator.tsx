@@ -1,8 +1,9 @@
 import type { AnswerMap, QuestionStatus } from '@/types';
+import { isQuestionAnswered } from '@/utils/permissions';
 import { Flag, CheckCircle2, Circle } from 'lucide-react';
 
 interface QuestionNavigatorProps {
-  questions: { id: number; section: string }[];
+  questions: { id: string; section: string }[];
   answers: AnswerMap;
   statuses: QuestionStatus;
   currentIndex: number;
@@ -17,14 +18,14 @@ export default function QuestionNavigator({
   onJump,
 }: QuestionNavigatorProps) {
   // Group by section
-  const sections: Record<string, number[]> = {};
+  const sections: Record<string, string[]> = {};
   questions.forEach((q) => {
     if (!sections[q.section]) sections[q.section] = [];
     sections[q.section].push(q.id);
   });
 
-  function getButtonClass(qid: number) {
-    const isAnswered = answers[qid] !== undefined;
+  function getButtonClass(qid: string) {
+    const isAnswered = isQuestionAnswered(answers[qid]);
     const isMarked = statuses[qid] === 'marked' || statuses[qid] === 'answered-marked';
     const isCurrent = questions[currentIndex]?.id === qid;
 
@@ -37,7 +38,7 @@ export default function QuestionNavigator({
     return bg;
   }
 
-  const answeredCount = Object.keys(answers).length;
+  const answeredCount = questions.filter((q) => isQuestionAnswered(answers[q.id])).length;
 
   return (
     <div className="flex flex-col h-full">

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import Button from '@/components/Button';
 import ExamHeader from '@/components/ExamHeader';
 import type { User } from '@/types';
+import { inspectVideoForFaceCheck } from '@/services/aiProctoringService';
 import {
   Camera,
   CheckCircle2,
@@ -19,6 +20,8 @@ interface FaceVerifyProps {
   user: User;
   step: number;
   stepLabels: string[];
+  startingExam?: boolean;
+  startError?: string;
   onContinue: () => void;
   onBack: () => void;
   onLogout: () => void;
@@ -26,92 +29,181 @@ interface FaceVerifyProps {
 
 type Phase = 'idle' | 'starting' | 'scanning' | 'verifying' | 'success' | 'failed';
 
+const REQUIRED_CLEAN_FRAMES = 5;
+
 export default function FaceVerify({
   user,
   step,
   stepLabels,
+  startingExam = false,
+  startError = '',
   onContinue,
   onBack,
   onLogout,
 }: FaceVerifyProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const scanTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+
   const [phase, setPhase] = useState<Phase>('idle');
   const [scanProgress, setScanProgress] = useState(0);
+  const [guidance, setGuidance] = useState('Center your face inside the oval guide…');
+  const [failReason, setFailReason] = useState('Camera access failed');
+  const [modelUnavailable, setModelUnavailable] = useState(false);
 
-  const stopStream = useCallback(() => {
+  const cleanup = useCallback(() => {
+    if (scanTimerRef.current !== null) {
+      window.clearInterval(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
   }, []);
 
-  useEffect(() => {
-    return () => stopStream();
-  }, [stopStream]);
+  const beginRealFaceScan = useCallback(() => {
+    setScanProgress(0);
+    setGuidance('Loading client-side face detector…');
+    let cleanCount = 0;
+    let totalAttempts = 0;
+    let busy = false;
 
-  async function startCamera() {
+    if (scanTimerRef.current !== null) {
+      window.clearInterval(scanTimerRef.current);
+    }
+
+    scanTimerRef.current = window.setInterval(async () => {
+      if (busy || !mountedRef.current || !videoRef.current) return;
+      busy = true;
+      totalAttempts += 1;
+
+      try {
+        const check = await inspectVideoForFaceCheck(videoRef.current);
+        if (!mountedRef.current) return;
+
+        if (!check.modelLoaded) {
+          setModelUnavailable(true);
+          setFailReason('AI face model could not be loaded (network/firewall restriction).');
+          setGuidance('You may retry or proceed with technical notice logged for your instructor.');
+          setPhase('failed');
+          cleanup();
+          return;
+        }
+
+        if (check.isObstructed) {
+          cleanCount = Math.max(0, cleanCount - 1);
+          setGuidance('Camera appears dark or obstructed — uncover lens and improve lighting.');
+        } else if (check.faceCount === 0) {
+          cleanCount = Math.max(0, cleanCount - 1);
+          setGuidance('No face detected — look directly toward the camera.');
+        } else if (check.faceCount > 1) {
+          cleanCount = 0;
+          setGuidance('Multiple faces detected — ensure only you are visible in frame.');
+        } else if (!check.centered) {
+          setGuidance('Move slightly closer and center your face inside the oval.');
+        } else {
+          cleanCount += 1;
+          setGuidance('Hold steady — confirming single-person camera presence…');
+        }
+
+        const pct = Math.min(100, Math.round((cleanCount / REQUIRED_CLEAN_FRAMES) * 100));
+        setScanProgress(pct);
+
+        if (cleanCount >= REQUIRED_CLEAN_FRAMES) {
+          setPhase('verifying');
+          cleanup();
+          if (mountedRef.current) {
+            setPhase('success');
+          }
+          return;
+        }
+
+        // Timeout after ~24 seconds so the student gets a clear retry button
+        if (totalAttempts >= 45) {
+          setFailReason('Could not confirm a clear single-person face frame in time.');
+          setPhase('failed');
+          cleanup();
+        }
+      } finally {
+        busy = false;
+      }
+    }, 520);
+  }, [cleanup]);
+
+  const startCamera = useCallback(async () => {
     setPhase('starting');
+    setModelUnavailable(false);
+    setScanProgress(0);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+      });
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
       }
       setPhase('scanning');
-      runScan();
+      beginRealFaceScan();
     } catch {
-      setPhase('failed');
+      if (mountedRef.current) {
+        setFailReason('Camera access denied or unavailable.');
+        setPhase('failed');
+      }
     }
-  }
-
-  function runScan() {
-    setScanProgress(0);
-    const interval = setInterval(() => {
-      setScanProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setPhase('verifying');
-          // Simulate face verification
-          setTimeout(() => {
-            stopStream();
-            setPhase('success');
-          }, 1500);
-          return 100;
-        }
-        return prev + 4;
-      });
-    }, 80);
-  }
-
-  function retry() {
-    stopStream();
-    setPhase('idle');
-    setScanProgress(0);
-  }
+  }, [beginRealFaceScan]);
 
   useEffect(() => {
-    if (phase === 'idle') {
-      startCamera();
-    }
-  }, []);
+    mountedRef.current = true;
+    void startCamera();
+    return () => {
+      mountedRef.current = false;
+      cleanup();
+    };
+  }, [startCamera, cleanup]);
+
+  function retry() {
+    cleanup();
+    void startCamera();
+  }
 
   return (
     <div className="min-h-screen bg-neutral-50">
-      <ExamHeader user={user} step={step} totalSteps={stepLabels.length} stepLabels={stepLabels} onLogout={onLogout} />
+      <ExamHeader
+        user={user}
+        step={step}
+        totalSteps={stepLabels.length}
+        stepLabels={stepLabels}
+        onLogout={() => {
+          cleanup();
+          onLogout();
+        }}
+      />
 
       <div className="max-w-3xl mx-auto px-4 sm:px-6 py-8">
         <div className="mb-8 animate-slide-up">
           <div className="flex items-center gap-2 text-sm font-semibold text-brand-600 mb-2">
             <ScanFace className="h-4 w-4" />
-            FACE VERIFICATION
+            CAMERA & FACE PRESENCE CHECK
           </div>
-          <h1 className="text-3xl font-bold text-neutral-900">Identity Confirmation</h1>
+          <h1 className="text-3xl font-bold text-neutral-900">Pre-Exam Camera Check</h1>
           <p className="text-neutral-500 mt-2">
-            Look directly at the camera. We'll verify your identity before the exam begins.
+            Look directly at the camera so we can confirm clear lighting and single-person face presence before starting.
           </p>
         </div>
+
+        {startError && (
+          <div className="flex items-start gap-2 p-4 mb-6 rounded-xl bg-error-50 border border-error-200 text-error-700 text-sm animate-fade-in">
+            <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+            <span>{startError}</span>
+          </div>
+        )}
 
         {/* Camera view */}
         <div className="bg-white rounded-2xl card-shadow-lg p-6 sm:p-8 animate-slide-up">
@@ -133,10 +225,12 @@ export default function FaceVerify({
             ) : null}
 
             {phase === 'failed' && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-3">
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-white gap-3 px-6 text-center bg-neutral-900/90">
                 <AlertCircle className="h-10 w-10 text-error-400" />
-                <p className="text-sm font-semibold">Camera access failed</p>
-                <p className="text-xs text-neutral-400">Please allow camera access and try again.</p>
+                <p className="text-sm font-semibold">{failReason}</p>
+                <p className="text-xs text-neutral-400">
+                  Ensure you are in a well-lit area with your webcam unobstructed, or retry below.
+                </p>
               </div>
             )}
 
@@ -160,21 +254,21 @@ export default function FaceVerify({
                 {phase === 'scanning' && (
                   <div
                     className="absolute left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-brand-400 to-transparent shadow-lg shadow-brand-400/50"
-                    style={{ top: `${scanProgress}%`, transition: 'top 0.08s linear' }}
+                    style={{ top: `${scanProgress}%`, transition: 'top 0.15s linear' }}
                   />
                 )}
                 {/* Status text */}
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-black/60 backdrop-blur-sm">
-                  <p className="text-sm font-semibold text-white flex items-center gap-2">
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-black/65 backdrop-blur-sm max-w-[90%]">
+                  <p className="text-xs sm:text-sm font-semibold text-white flex items-center gap-2 truncate">
                     {phase === 'scanning' ? (
                       <>
-                        <ScanFace className="h-4 w-4 text-brand-400" />
-                        Scanning… {scanProgress}%
+                        <ScanFace className="h-4 w-4 text-brand-400 flex-shrink-0" />
+                        <span className="truncate">{guidance} ({scanProgress}%)</span>
                       </>
                     ) : (
                       <>
-                        <Loader2 className="h-4 w-4 text-brand-400 animate-spin" />
-                        Verifying identity…
+                        <Loader2 className="h-4 w-4 text-brand-400 animate-spin flex-shrink-0" />
+                        <span>Finalizing check…</span>
                       </>
                     )}
                   </p>
@@ -187,8 +281,10 @@ export default function FaceVerify({
                 <div className="flex items-center justify-center h-20 w-20 rounded-full bg-white/20">
                   <CheckCircle2 className="h-12 w-12 text-white" />
                 </div>
-                <p className="text-lg font-bold text-white">Identity Verified!</p>
-                <p className="text-sm text-success-100">You're cleared to start the exam.</p>
+                <p className="text-lg font-bold text-white">Face Presence Confirmed!</p>
+                <p className="text-sm text-success-100">
+                  Single-person camera framing and lighting check passed.
+                </p>
               </div>
             )}
           </div>
@@ -198,7 +294,7 @@ export default function FaceVerify({
             <div className="mt-6 max-w-2xl mx-auto">
               <div className="w-full h-2 bg-neutral-200 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-brand-500 to-brand-600 rounded-full transition-all duration-100"
+                  className="h-full bg-gradient-to-r from-brand-500 to-brand-600 rounded-full transition-all duration-150"
                   style={{ width: `${phase === 'verifying' ? 100 : scanProgress}%` }}
                 />
               </div>
@@ -208,9 +304,9 @@ export default function FaceVerify({
           {/* Info row */}
           <div className="mt-6 grid grid-cols-3 gap-3 max-w-2xl mx-auto">
             {[
-              { icon: UserCheck, label: 'Face Detected', active: phase !== 'idle' && phase !== 'starting' },
-              { icon: ShieldCheck, label: 'Liveness Check', active: phase === 'scanning' || phase === 'verifying' || phase === 'success' },
-              { icon: CheckCircle2, label: 'Verified', active: phase === 'success' },
+              { icon: UserCheck, label: 'Face Detected', active: scanProgress >= 20 || phase === 'success' },
+              { icon: ShieldCheck, label: 'Lighting & Frame', active: scanProgress >= 60 || phase === 'success' },
+              { icon: CheckCircle2, label: 'Camera Ready', active: phase === 'success' },
             ].map((item) => (
               <div
                 key={item.label}
@@ -228,11 +324,16 @@ export default function FaceVerify({
 
           {/* Actions */}
           {phase === 'failed' && (
-            <div className="mt-6 flex justify-center">
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <Button variant="outline" onClick={retry}>
                 <RefreshCw className="h-4 w-4" />
                 Try Again
               </Button>
+              {modelUnavailable && (
+                <Button variant="ghost" onClick={onContinue} disabled={startingExam}>
+                  Proceed with Instructor Notice
+                </Button>
+              )}
             </div>
           )}
 
@@ -241,8 +342,9 @@ export default function FaceVerify({
             <div className="flex items-start gap-3">
               <Camera className="h-5 w-5 text-neutral-400 flex-shrink-0 mt-0.5" />
               <p className="text-xs text-neutral-500 leading-relaxed">
-                Your facial data is processed securely and is only used for identity verification
-                and proctoring during this exam session. Data is not stored permanently.
+                Face presence detection runs locally in your browser using lightweight AI vision
+                and confirms camera framing — it does not store biometric templates or perform
+                automated disciplinary decisions.
               </p>
             </div>
           </div>
@@ -250,18 +352,34 @@ export default function FaceVerify({
 
         {/* Navigation */}
         <div className="mt-8 flex items-center justify-between">
-          <Button variant="ghost" onClick={() => { stopStream(); onBack(); }}>
+          <Button
+            variant="ghost"
+            disabled={startingExam}
+            onClick={() => {
+              cleanup();
+              onBack();
+            }}
+          >
             <ArrowLeft className="h-4 w-4" />
             Back
           </Button>
           <Button
             size="lg"
             onClick={onContinue}
-            disabled={phase !== 'success'}
+            disabled={(phase !== 'success' && !modelUnavailable) || startingExam}
             className="group"
           >
-            Start Exam
-            <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+            {startingExam ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Starting Session…
+              </>
+            ) : (
+              <>
+                Start Exam
+                <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
+              </>
+            )}
           </Button>
         </div>
       </div>

@@ -1,0 +1,230 @@
+import { test, expect } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+const upgradedScreenshotsDir =
+  'C:\\Users\\Asus\\.gemini\\antigravity\\brain\\89e8b46c-4e43-4577-8362-7933e821227b\\upgraded';
+mkdirSync(upgradedScreenshotsDir, { recursive: true });
+
+test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Regression', () => {
+  test('1. Responsive landing, authentication failure, rate-limiting & unauthorized teacher route block', async ({
+    page,
+    browser,
+  }) => {
+    await page.goto('/');
+    await expect(page.getByRole('heading', { name: /Secure\. Intelligent\./i })).toBeVisible();
+    await page.screenshot({ path: join(upgradedScreenshotsDir, '01-landing-desktop.png'), fullPage: true, animations: 'disabled' });
+
+    // Responsive mobile layout check (no horizontal scroll overflow)
+    const mobileCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const mobilePage = await mobileCtx.newPage();
+    await mobilePage.goto('/');
+    const hasOverflow = await mobilePage.evaluate(
+      () => document.documentElement.scrollWidth > document.documentElement.clientWidth
+    );
+    expect(hasOverflow).toBe(false);
+    await mobilePage.screenshot({ path: join(upgradedScreenshotsDir, '01b-landing-mobile.png'), fullPage: true, animations: 'disabled' });
+    await mobileCtx.close();
+
+    // Student Login screen — verify Demo Mode notice is gone & invalid credentials fail cleanly
+    await page.getByRole('button', { name: /Student Portal/i }).click();
+    await expect(page.getByText(/Demo Mode/i)).toHaveCount(0);
+    await page.screenshot({ path: join(upgradedScreenshotsDir, '02-student-login.png'), fullPage: true, animations: 'disabled' });
+
+    // 5 failed attempts trigger progressive rate-limit lockout
+    for (let i = 0; i < 5; i++) {
+      await page.fill('input[type="email"]', 'locktest@university.edu');
+      await page.fill('input[type="password"]', 'WrongPassword!1');
+      await page.getByRole('button', { name: /Sign In as Student/i }).click();
+      await expect(page.getByRole('alert')).toBeVisible();
+    }
+    await page.getByRole('button', { name: /Sign In as Student/i }).click();
+    await expect(page.getByRole('alert')).toContainText(/Too many sign-in attempts/i);
+
+    // Unapproved teacher registration cannot access Teacher Dashboard
+    await page.getByRole('button', { name: /Back to Home/i }).click();
+    await page.getByRole('button', { name: /Teacher Portal/i }).click();
+    await page.screenshot({ path: join(upgradedScreenshotsDir, '10-teacher-login.png'), fullPage: true, animations: 'disabled' });
+
+    // Student attempting to sign into Teacher Portal is rejected
+    await page.fill('input[type="email"]', 'student@university.edu');
+    await page.fill('input[type="password"]', 'Student#2026!');
+    await page.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(page.getByRole('alert')).toContainText(/does not have faculty privileges/i);
+
+    // Valid student login -> manual URL navigation to /teacher/dashboard is strictly blocked
+    await page.getByRole('button', { name: /Back to Home/i }).click();
+    await page.getByRole('button', { name: /Student Portal/i }).click();
+    await page.fill('input[type="email"]', 'student@university.edu');
+    await page.fill('input[type="password"]', 'Student#2026!');
+    await page.getByRole('button', { name: /Sign In as Student/i }).click();
+    await expect(page.getByRole('heading', { name: /Student Examination Portal/i })).toBeVisible();
+
+    await page.goto('/teacher/dashboard');
+    await expect(page.getByRole('heading', { name: /Exam Management Dashboard/i })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: /Student Examination Portal/i })).toBeVisible();
+  });
+
+  test('2. Teacher creates exam, student joins via code, handles permission denial, refresh & offline sync, and teacher publishes results', async ({
+    browser,
+  }) => {
+    // --- Teacher session: sign in, view dashboard, create & publish a new exam ---
+    const teacherCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const teacherPage = await teacherCtx.newPage();
+    await teacherPage.goto('/');
+    await teacherPage.getByRole('button', { name: /Teacher Portal/i }).click();
+    await teacherPage.fill('input[type="email"]', 'faculty@university.edu');
+    await teacherPage.fill('input[type="password"]', 'Faculty#2026!');
+    await teacherPage.getByRole('button', { name: /Sign In as Teacher/i }).click();
+
+    await expect(teacherPage.getByRole('heading', { name: /Exam Management Dashboard/i })).toBeVisible();
+    await teacherPage.waitForTimeout(500);
+    await teacherPage.screenshot({ path: join(upgradedScreenshotsDir, '11-teacher-dashboard.png'), fullPage: true, animations: 'disabled' });
+
+    await teacherPage.getByRole('button', { name: /Create New Exam/i }).click();
+    await expect(teacherPage.getByRole('heading', { name: /Create New Exam/i })).toBeVisible();
+    await teacherPage.screenshot({ path: join(upgradedScreenshotsDir, '12-create-exam-modal.png'), fullPage: true, animations: 'disabled' });
+
+    await teacherPage.fill('input[placeholder*="Data Structures"]', 'Operating Systems Quiz');
+    await teacherPage.fill('input[placeholder*="CS 401"]', 'CS 402');
+    await teacherPage.fill('input[placeholder="e.g. Data Structures & Algorithms"]', 'Operating Systems');
+    await teacherPage.getByLabel(/Publish immediately/i).check();
+    await teacherPage.getByRole('button', { name: /Continue/i }).click();
+
+    // Step 2: Instructions
+    await teacherPage.getByRole('button', { name: /Continue/i }).click();
+
+    // Step 3: Questions (add 2 questions)
+    await teacherPage.fill('textarea[placeholder*="Enter your question"]', 'Which scheduler prevents starvation via aging?');
+    const optInputs = teacherPage.locator('input[placeholder^="Option "]');
+    await optInputs.nth(0).fill('Priority Scheduling with Aging');
+    await optInputs.nth(1).fill('Pure FCFS');
+    await optInputs.nth(2).fill('Pure LIFO');
+    await optInputs.nth(3).fill('Random Selection');
+
+    await teacherPage.getByRole('button', { name: /Create Exam/i }).click();
+    await expect(teacherPage.getByText(/CS 402 — Operating Systems Quiz/i).first()).toBeVisible();
+
+    // Read generated 8-char Join Code from dashboard control bar
+    const joinCodeEl = teacherPage.locator('span.font-mono').first();
+    const joinCode = (await joinCodeEl.textContent())?.trim() ?? '';
+    expect(joinCode).toMatch(/^[A-Z2-9]{8}$/);
+
+    // --- Student session: join via code, test permission denial + model failure fallback, take exam ---
+    const studentCtx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      permissions: ['camera', 'microphone'],
+    });
+    const studentPage = await studentCtx.newPage();
+
+    // First simulate screen-sharing permission denial, then grant on retry;
+    // also block external MediaPipe CDN in this E2E run to test graceful AI model failure handling!
+    await studentPage.route('https://cdn.jsdelivr.net/**', (route) => route.abort());
+    await studentPage.route('https://storage.googleapis.com/**', (route) => route.abort());
+
+    await studentPage.addInitScript(() => {
+      let screenCalls = 0;
+      navigator.mediaDevices.getDisplayMedia = async () => {
+        screenCalls += 1;
+        if (screenCalls === 1) {
+          throw new DOMException('Permission denied by user', 'NotAllowedError');
+        }
+        return navigator.mediaDevices.getUserMedia({ video: true });
+      };
+    });
+
+    await studentPage.goto('/');
+    await studentPage.getByRole('button', { name: /Student Portal/i }).click();
+    await studentPage.fill('input[type="email"]', 'student@university.edu');
+    await studentPage.fill('input[type="password"]', 'Student#2026!');
+    await studentPage.getByRole('button', { name: /Sign In as Student/i }).click();
+
+    // Invalid code rejected
+    await studentPage.fill('input[placeholder*="8-character"]', 'BAD99999');
+    await studentPage.getByRole('button', { name: /Join Exam/i }).click();
+    await expect(studentPage.getByText(/Invalid or inactive examination code/i)).toBeVisible();
+
+    // Join teacher's newly published CS 402 exam + also screenshot CS 401 instructions for visual parity
+    await studentPage.fill('input[placeholder*="8-character"]', joinCode);
+    await studentPage.getByRole('button', { name: /Join Exam/i }).click();
+    await expect(studentPage.getByText(/Joined "CS 402/i)).toBeVisible();
+
+    await studentPage.getByRole('button', { name: /Begin Check-in/i }).first().click();
+
+    // Explicit consent is unchecked by default -> Continue button disabled until checked!
+    const continueBtn = studentPage.getByRole('button', { name: /I Understand — Continue/i });
+    await expect(continueBtn).toBeDisabled();
+    await studentPage.locator('input[type="checkbox"]').check();
+    await expect(continueBtn).toBeEnabled();
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '03-instructions.png'), fullPage: true, animations: 'disabled' });
+    await continueBtn.click();
+
+    // Step 2: Device Check
+    await expect(studentPage.getByRole('heading', { name: /System Verification/i })).toBeVisible();
+    await studentPage.waitForTimeout(500);
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '04-device-check.png'), fullPage: true, animations: 'disabled' });
+    await studentPage.getByRole('button', { name: /Continue/i }).click();
+
+    // Step 3: Permissions (3rd button denies screen share first -> shows warning -> retry succeeds!)
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '05-permissions.png'), fullPage: true, animations: 'disabled' });
+    await studentPage.getByRole('button', { name: /Allow/i }).first().click();
+    await studentPage.getByRole('button', { name: /Allow/i }).first().click();
+    await studentPage.getByRole('button', { name: /Allow/i }).first().click();
+    await expect(studentPage.getByText('Denied', { exact: true })).toBeVisible();
+    await studentPage.locator('button[title="Retry"]').click();
+    await expect(studentPage.getByText(/All permissions granted/i)).toBeVisible();
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '05b-permissions-granted.png'), fullPage: true, animations: 'disabled' });
+
+    await studentPage.getByRole('button', { name: /Continue to Camera Check/i }).click();
+
+    // Step 4: Face Check — verifies graceful AI model failure fallback (never fakes "Identity Verified!")
+    await expect(studentPage.getByText(/Identity Verified/i)).toHaveCount(0);
+    await expect(studentPage.getByRole('button', { name: /Proceed with Instructor Notice/i })).toBeVisible({
+      timeout: 15000,
+    });
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '06-face-verify.png'), fullPage: true, animations: 'disabled' });
+    await studentPage.getByRole('button', { name: /Proceed with Instructor Notice/i }).click();
+
+    // Active Exam Screen
+    await expect(studentPage.getByText(/PROCTORING ACTIVE/i)).toBeVisible();
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '07-exam-screen.png'), fullPage: true, animations: 'disabled' });
+
+    // Select correct option A
+    await studentPage.getByRole('button', { name: /Priority Scheduling with Aging/i }).click();
+    await expect(studentPage.getByText(/1 answered/i)).toBeVisible();
+    await studentPage.waitForTimeout(800); // allow debounced server save
+
+    // Browser refresh mid-exam: recovers session, preserves answer, does NOT reset server timer
+    await studentPage.reload();
+    await expect(studentPage.getByText(/PROCTORING ACTIVE/i)).toBeVisible();
+    await expect(studentPage.getByText(/1 answered/i)).toBeVisible();
+
+    // Offline caching & reconnection sync
+    await studentCtx.setOffline(true);
+    await studentPage.getByRole('button', { name: /Flag for review/i }).click();
+    await expect(studentPage.getByText(/Offline · Cached/i)).toBeVisible();
+    await studentCtx.setOffline(false);
+    await expect(studentPage.getByText(/Saved/i)).toBeVisible({ timeout: 10000 });
+
+    // Submit Modal & Submission (scores gated before teacher publishes!)
+    await studentPage.getByRole('button', { name: /^Submit$/i }).click();
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '08-submit-modal.png'), fullPage: true, animations: 'disabled' });
+    await studentPage.getByRole('button', { name: /Submit Now/i }).click();
+
+    await expect(studentPage.getByText(/AWAITING INSTRUCTOR PUBLICATION/i)).toBeVisible();
+
+    // Teacher publishes results -> Student sees 100% PASSED & question review!
+    await teacherPage.getByRole('button', { name: /Refresh/i }).click();
+    await teacherPage.getByRole('button', { name: /Publish Results/i }).click();
+    await expect(teacherPage.getByRole('button', { name: /Unpublish Results/i })).toBeVisible();
+
+    await studentPage.getByRole('button', { name: /Back to Portal/i }).click();
+    await studentPage.getByRole('button', { name: /View Result/i }).first().click();
+    await expect(studentPage.getByText('100%')).toBeVisible();
+    await expect(studentPage.getByText('PASSED')).toBeVisible();
+    await studentPage.screenshot({ path: join(upgradedScreenshotsDir, '09-exam-complete.png'), fullPage: true, animations: 'disabled' });
+
+    await studentCtx.close();
+    await teacherCtx.close();
+  });
+});

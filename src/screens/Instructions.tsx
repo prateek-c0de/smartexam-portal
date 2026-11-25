@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import Button from '@/components/Button';
 import ExamHeader from '@/components/ExamHeader';
 import type { Exam, User } from '@/types';
@@ -9,6 +10,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   ArrowRight,
+  ArrowLeft,
   Monitor,
   Camera,
   Mic,
@@ -20,7 +22,8 @@ interface InstructionsProps {
   exam: Exam;
   step: number;
   stepLabels: string[];
-  onContinue: () => void;
+  onContinue: (consentGiven: boolean) => void;
+  onBack?: () => void;
   onLogout: () => void;
 }
 
@@ -30,8 +33,11 @@ export default function Instructions({
   step,
   stepLabels,
   onContinue,
+  onBack,
   onLogout,
 }: InstructionsProps) {
+  const [consented, setConsented] = useState(false);
+
   return (
     <div className="min-h-screen bg-neutral-50">
       <ExamHeader user={user} step={step} totalSteps={stepLabels.length} stepLabels={stepLabels} onLogout={onLogout} />
@@ -71,11 +77,12 @@ export default function Instructions({
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="h-5 w-5 text-warning-600 flex-shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-sm font-semibold text-warning-800">Academic Integrity Notice</p>
+                    <p className="text-sm font-semibold text-warning-800">Academic Integrity & Privacy Notice</p>
                     <p className="text-sm text-warning-700 mt-1 leading-relaxed">
-                      Any violation of exam rules — including tab switching, leaving full-screen
-                      mode, or suspicious behavior — will be recorded and may result in
-                      disqualification.
+                      During the active examination only, client-side AI and browser signals (tab focus,
+                      fullscreen state, face presence, prohibited objects, and sustained speech-band audio)
+                      generate reviewable event metadata for your instructor. Continuous raw video/audio is
+                      never recorded by default, and all media streams stop immediately upon submission or exit.
                     </p>
                   </div>
                 </div>
@@ -95,17 +102,36 @@ export default function Instructions({
                 ))}
               </div>
 
-              {/* Consent checkbox */}
+              {/* Explicit consent checkbox (unchecked by default) */}
               <label className="flex items-start gap-3 mt-6 cursor-pointer">
-                <input type="checkbox" defaultChecked className="mt-1 rounded border-neutral-300 text-brand-600 focus:ring-brand-500" />
+                <input
+                  type="checkbox"
+                  checked={consented}
+                  onChange={(e) => setConsented(e.target.checked)}
+                  className="mt-1 rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                />
                 <span className="text-sm text-neutral-700 leading-relaxed">
-                  I have read and understood all instructions. I consent to webcam, microphone,
-                  and screen monitoring during this examination.
+                  I have read and understood all instructions and the privacy disclosure above. I
+                  explicitly consent to live webcam, microphone, and screen monitoring during this
+                  examination session.
                 </span>
               </label>
 
-              <div className="mt-6 flex justify-end">
-                <Button size="lg" onClick={onContinue} className="group">
+              <div className="mt-6 flex items-center justify-between gap-3">
+                {onBack ? (
+                  <Button variant="ghost" onClick={onBack}>
+                    <ArrowLeft className="h-4 w-4" />
+                    All Exams
+                  </Button>
+                ) : (
+                  <div />
+                )}
+                <Button
+                  size="lg"
+                  disabled={!consented}
+                  onClick={() => onContinue(true)}
+                  className="group"
+                >
                   I Understand — Continue
                   <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
                 </Button>
@@ -122,8 +148,8 @@ export default function Instructions({
               <div className="space-y-4">
                 {[
                   { icon: Clock, label: 'Duration', value: `${exam.durationMinutes} minutes` },
-                  { icon: FileText, label: 'Questions', value: `${exam.totalQuestions} MCQs` },
-                  { icon: Award, label: 'Total Marks', value: `${exam.totalMarks}` },
+                  { icon: FileText, label: 'Questions', value: `${exam.totalQuestions} Questions` },
+                  { icon: Award, label: 'Total Marks', value: `${exam.totalMarks}${exam.negativeMarkingRatio ? ` (-${Math.round(exam.negativeMarkingRatio * 100)}% wrong)` : ''}` },
                   { icon: Monitor, label: 'Format', value: 'Online Proctored' },
                 ].map((item) => (
                   <div key={item.label} className="flex items-center gap-3">

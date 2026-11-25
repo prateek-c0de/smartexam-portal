@@ -36,22 +36,28 @@ export function detectDevice(): Omit<DeviceCheck, 'internetSpeed'> {
   };
 }
 
-export async function checkInternetSpeed(): Promise<'good' | 'poor'> {
+export async function checkInternetSpeed(signal?: AbortSignal): Promise<'good' | 'poor'> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'poor';
   const start = performance.now();
   try {
-    await fetch('https://www.gstatic.com/generate_204', { mode: 'no-cors', cache: 'no-store' })
-      .catch(() => {});
+    await fetch('https://www.gstatic.com/generate_204', {
+      mode: 'no-cors',
+      cache: 'no-store',
+      signal,
+    });
     const elapsed = performance.now() - start;
-    return elapsed < 500 ? 'good' : 'poor';
+    return elapsed < 800 ? 'good' : 'poor';
   } catch {
-    return 'poor';
+    return navigator.onLine ? 'good' : 'poor';
   }
 }
 
 export async function requestCameraPermission(): Promise<PermissionState> {
   if (!navigator.mediaDevices?.getUserMedia) return 'unsupported';
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15, max: 24 } },
+    });
     stream.getTracks().forEach((t) => t.stop());
     return 'granted';
   } catch {
@@ -62,7 +68,9 @@ export async function requestCameraPermission(): Promise<PermissionState> {
 export async function requestMicrophonePermission(): Promise<PermissionState> {
   if (!navigator.mediaDevices?.getUserMedia) return 'unsupported';
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+    });
     stream.getTracks().forEach((t) => t.stop());
     return 'granted';
   } catch {
@@ -73,7 +81,9 @@ export async function requestMicrophonePermission(): Promise<PermissionState> {
 export async function requestScreenPermission(): Promise<PermissionState> {
   if (!navigator.mediaDevices?.getDisplayMedia) return 'unsupported';
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 5, max: 10 } },
+    });
     stream.getTracks().forEach((t) => t.stop());
     return 'granted';
   } catch {
@@ -82,33 +92,47 @@ export async function requestScreenPermission(): Promise<PermissionState> {
 }
 
 export async function startCameraStream(): Promise<MediaStream | null> {
+  if (!navigator.mediaDevices?.getUserMedia) return null;
   try {
-    return await navigator.mediaDevices.getUserMedia({ video: true });
+    return await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 480, max: 640 }, height: { ideal: 360, max: 480 }, frameRate: { ideal: 15, max: 20 } },
+    });
   } catch {
     return null;
   }
 }
 
-export function stopStream(stream: MediaStream | null): void {
-  if (stream) stream.getTracks().forEach((t) => t.stop());
+export function stopStream(stream: MediaStream | null | undefined): void {
+  if (stream) {
+    stream.getTracks().forEach((t) => {
+      try {
+        t.stop();
+      } catch {
+        // Ignore already-stopped tracks
+      }
+    });
+  }
 }
 
-export function captureFrame(video: HTMLVideoElement): Blob | null {
+export async function captureFrame(video: HTMLVideoElement, maxWidth = 480): Promise<Blob | null> {
+  if (!video.videoWidth || !video.videoHeight) return null;
+  const scale = Math.min(1, maxWidth / video.videoWidth);
   const canvas = document.createElement('canvas');
-  canvas.width = video.videoWidth || 320;
-  canvas.height = video.videoHeight || 240;
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   return new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.8);
-  }) as unknown as Blob | null;
+    canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.72);
+  });
 }
 
 export function formatTime(seconds: number): string {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
+  const safe = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
   if (h > 0) {
     return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
@@ -126,4 +150,11 @@ export function pickAvatarColor(seed: string): string {
     hash = seed.charCodeAt(i) + ((hash << 5) - hash);
   }
   return avatarColors[Math.abs(hash) % avatarColors.length];
+}
+
+export function isQuestionAnswered(val: number | number[] | string | undefined | null): boolean {
+  if (val === undefined || val === null) return false;
+  if (Array.isArray(val)) return val.length > 0;
+  if (typeof val === 'string') return val.trim().length > 0;
+  return true;
 }

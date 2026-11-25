@@ -7,12 +7,15 @@ import {
   Lock,
   Users,
   AlertCircle,
+  CheckCircle2,
   Eye,
   EyeOff,
+  User as UserIcon,
+  Building2,
 } from 'lucide-react';
 import type { Role, User } from '@/types';
-import { api } from '@/services/api';
-import { pickAvatarColor } from '@/utils/permissions';
+import { AppError } from '@/lib/supabase';
+import { authService, validateStrongPassword } from '@/services/authService';
 
 interface LoginScreenProps {
   role: Role;
@@ -20,39 +23,152 @@ interface LoginScreenProps {
   onLogin: (user: User) => void;
 }
 
+type AuthMode = 'signin' | 'register' | 'forgot';
+
 export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps) {
+  const [mode, setMode] = useState<AuthMode>('signin');
+  const [fullName, setFullName] = useState('');
+  const [institution, setInstitution] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
+  const [errorCode, setErrorCode] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
   const isStudent = role === 'student';
 
+  function switchMode(next: AuthMode) {
+    setMode(next);
+    setError('');
+    setErrorCode('');
+    setInfoMessage('');
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
+    setErrorCode('');
+    setInfoMessage('');
 
-    if (!email || !password) {
+    if (mode === 'forgot') {
+      if (!email.trim()) {
+        setError('Please enter your email address.');
+        return;
+      }
+      setLoading(true);
+      try {
+        await authService.requestPasswordReset(email);
+        setInfoMessage(
+          'If an account exists for that email address, a password reset link has been sent.'
+        );
+      } catch (err) {
+        const appErr = err instanceof AppError ? err : null;
+        setError(appErr?.message ?? 'Could not send reset email. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (mode === 'register') {
+      if (!fullName.trim() || !email.trim() || !password) {
+        setError('Please fill in your full name, email address, and password.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Passwords do not match.');
+        return;
+      }
+      const pwCheck = validateStrongPassword(password, email);
+      if (!pwCheck.valid) {
+        setError(`Strong password required: ${pwCheck.errors.join(', ')}.`);
+        return;
+      }
+
+      setLoading(true);
+      try {
+        const res = await authService.register({
+          email,
+          password,
+          fullName,
+          requestedRole: role,
+          institution,
+        });
+
+        if (res.pendingTeacherApproval) {
+          setInfoMessage(
+            res.requiresEmailVerification
+              ? 'Verification email sent. Confirm your email address; an administrator must also approve faculty access before you can sign in to the Teacher Portal.'
+              : 'Faculty registration submitted. Your account awaits administrator approval before Teacher Portal access is enabled.'
+          );
+          setMode('signin');
+          setPassword('');
+          setConfirmPassword('');
+          return;
+        }
+
+        if (res.requiresEmailVerification) {
+          setInfoMessage(
+            'Account created! Check your inbox and click the verification link before signing in.'
+          );
+          setMode('signin');
+          setPassword('');
+          setConfirmPassword('');
+          return;
+        }
+
+        if (res.user) {
+          onLogin(res.user);
+        }
+      } catch (err) {
+        const appErr = err instanceof AppError ? err : null;
+        setErrorCode(appErr?.code ?? '');
+        setError(appErr?.message ?? 'Registration failed. Please verify your details and try again.');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    // Sign In
+    if (!email.trim() || !password) {
       setError('Please enter both your email and password.');
       return;
     }
 
     setLoading(true);
     try {
-      const result = isStudent
-        ? await api.studentLogin(email, password)
-        : await api.teacherLogin(email, password);
-      onLogin({
-        ...result.user,
-        avatarColor: pickAvatarColor(result.user.email),
-      });
-    } catch {
-      setError('Unable to sign in. Please check your credentials and try again.');
+      const verifiedUser = await authService.signIn(email, password, role);
+      onLogin(verifiedUser);
+    } catch (err) {
+      const appErr = err instanceof AppError ? err : null;
+      setErrorCode(appErr?.code ?? '');
+      setError(appErr?.message ?? 'Unable to sign in. Please check your credentials and try again.');
     } finally {
       setLoading(false);
     }
   }
+
+  async function handleResendVerification() {
+    if (!email.trim()) return;
+    setLoading(true);
+    try {
+      await authService.resendVerificationEmail(email);
+      setError('');
+      setErrorCode('');
+      setInfoMessage('Verification email resent. Please check your inbox and spam folder.');
+    } catch (err) {
+      const appErr = err instanceof AppError ? err : null;
+      setError(appErr?.message ?? 'Unable to resend verification email.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const pwValidation = mode === 'register' && password ? validateStrongPassword(password, email) : null;
 
   return (
     <div className="min-h-screen flex flex-col bg-neutral-50">
@@ -89,22 +205,98 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
             </div>
 
             <h2 className="text-2xl font-bold text-neutral-900 text-center mb-1">
-              {isStudent ? 'Student Sign In' : 'Faculty Sign In'}
+              {mode === 'forgot'
+                ? 'Reset Password'
+                : mode === 'register'
+                  ? isStudent
+                    ? 'Create Student Account'
+                    : 'Request Faculty Account'
+                  : isStudent
+                    ? 'Student Sign In'
+                    : 'Faculty Sign In'}
             </h2>
             <p className="text-sm text-neutral-500 text-center mb-8">
-              {isStudent
-                ? 'Enter your university credentials to access your exams.'
-                : 'Sign in to manage exams and view student results.'}
+              {mode === 'forgot'
+                ? 'Enter your registered email address to receive a password reset link.'
+                : mode === 'register'
+                  ? isStudent
+                    ? 'Register with your university email to attend examinations.'
+                    : 'Faculty accounts require administrator verification before activation.'
+                  : isStudent
+                    ? 'Enter your university credentials to access your exams.'
+                    : 'Sign in to manage exams and view student results.'}
             </p>
 
             {error && (
-              <div className="flex items-start gap-2 p-3 mb-5 rounded-xl bg-error-50 border border-error-200 text-error-700 text-sm animate-fade-in">
-                <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
-                <span>{error}</span>
+              <div
+                role="alert"
+                className="flex flex-col gap-2 p-3 mb-5 rounded-xl bg-error-50 border border-error-200 text-error-700 text-sm animate-fade-in"
+              >
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
+                  <span>{error}</span>
+                </div>
+                {errorCode === 'EMAIL_UNVERIFIED' && (
+                  <button
+                    type="button"
+                    onClick={handleResendVerification}
+                    className="self-start ml-7 text-xs font-semibold text-brand-600 hover:text-brand-700 underline"
+                  >
+                    Resend verification email
+                  </button>
+                )}
+              </div>
+            )}
+
+            {infoMessage && (
+              <div
+                role="status"
+                className="flex items-start gap-2 p-3 mb-5 rounded-xl bg-success-50 border border-success-200 text-success-700 text-sm animate-fade-in"
+              >
+                <CheckCircle2 className="h-5 w-5 flex-shrink-0 mt-0.5" />
+                <span>{infoMessage}</span>
               </div>
             )}
 
             <form onSubmit={handleSubmit} className="space-y-5">
+              {mode === 'register' && (
+                <div>
+                  <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+                    Full Name
+                  </label>
+                  <div className="relative">
+                    <UserIcon className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-neutral-400" />
+                    <input
+                      type="text"
+                      value={fullName}
+                      onChange={(e) => setFullName(e.target.value)}
+                      placeholder={isStudent ? 'Alex Rivera' : 'Prof. Ada Lovelace'}
+                      className="w-full pl-11 pr-4 py-3 rounded-xl border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all"
+                      autoComplete="name"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {mode === 'register' && !isStudent && (
+                <div>
+                  <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+                    Department / Institution
+                  </label>
+                  <div className="relative">
+                    <Building2 className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-neutral-400" />
+                    <input
+                      type="text"
+                      value={institution}
+                      onChange={(e) => setInstitution(e.target.value)}
+                      placeholder="Computer Science Department"
+                      className="w-full pl-11 pr-4 py-3 rounded-xl border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all"
+                      autoComplete="organization"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
                   Email Address
@@ -124,50 +316,118 @@ export default function LoginScreen({ role, onBack, onLogin }: LoginScreenProps)
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
-                  Password
-                </label>
-                <div className="relative">
-                  <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-neutral-400" />
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Enter your password"
-                    className="w-full pl-11 pr-11 py-3 rounded-xl border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all"
-                    autoComplete="current-password"
-                  />
+              {mode !== 'forgot' && (
+                <div>
+                  <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-neutral-400" />
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder={mode === 'register' ? 'Minimum 10 characters' : 'Enter your password'}
+                      className="w-full pl-11 pr-11 py-3 rounded-xl border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all"
+                      autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-3.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+                    >
+                      {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                    </button>
+                  </div>
+                  {pwValidation && !pwValidation.valid && (
+                    <p className="mt-1.5 text-xs text-warning-700">
+                      Needed: {pwValidation.errors.join(' · ')}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {mode === 'register' && (
+                <div>
+                  <label className="block text-sm font-semibold text-neutral-700 mb-1.5">
+                    Confirm Password
+                  </label>
+                  <div className="relative">
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-neutral-400" />
+                    <input
+                      type={showPassword ? 'text' : 'password'}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Re-enter your password"
+                      className="w-full pl-11 pr-4 py-3 rounded-xl border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent transition-all"
+                      autoComplete="new-password"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {mode === 'signin' && (
+                <div className="flex items-center justify-between text-sm">
+                  <label className="flex items-center gap-2 text-neutral-600 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      defaultChecked
+                      className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    Keep me signed in
+                  </label>
                   <button
                     type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+                    onClick={() => switchMode('forgot')}
+                    className="text-brand-600 font-semibold hover:text-brand-700"
                   >
-                    {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                    Forgot password?
                   </button>
                 </div>
-              </div>
-
-              <div className="flex items-center justify-between text-sm">
-                <label className="flex items-center gap-2 text-neutral-600 cursor-pointer">
-                  <input type="checkbox" className="rounded border-neutral-300 text-brand-600 focus:ring-brand-500" />
-                  Remember me
-                </label>
-                <button type="button" className="text-brand-600 font-semibold hover:text-brand-700">
-                  Forgot password?
-                </button>
-              </div>
+              )}
 
               <Button type="submit" fullWidth size="lg" disabled={loading}>
-                {loading ? 'Signing in…' : `Sign In as ${isStudent ? 'Student' : 'Teacher'}`}
+                {loading
+                  ? mode === 'forgot'
+                    ? 'Sending link…'
+                    : mode === 'register'
+                      ? 'Creating account…'
+                      : 'Signing in…'
+                  : mode === 'forgot'
+                    ? 'Send Reset Link'
+                    : mode === 'register'
+                      ? isStudent
+                        ? 'Register as Student'
+                        : 'Submit Faculty Request'
+                      : `Sign In as ${isStudent ? 'Student' : 'Teacher'}`}
               </Button>
             </form>
 
-            <div className="mt-6 p-4 rounded-xl bg-neutral-50 border border-neutral-200">
-              <p className="text-xs text-neutral-500 leading-relaxed text-center">
-                <span className="font-semibold text-neutral-700">Demo Mode:</span> Enter any email
-                and password to continue. The app is fully functional in frontend-only mode.
-              </p>
+            <div className="mt-6 p-4 rounded-xl bg-neutral-50 border border-neutral-200 text-center">
+              {mode === 'signin' ? (
+                <p className="text-xs text-neutral-600">
+                  {isStudent ? 'Don’t have a student account?' : 'Need faculty portal access?'}{' '}
+                  <button
+                    type="button"
+                    onClick={() => switchMode('register')}
+                    className="font-semibold text-brand-600 hover:text-brand-700"
+                  >
+                    {isStudent ? 'Create Account' : 'Request Provisioning'}
+                  </button>
+                </p>
+              ) : (
+                <p className="text-xs text-neutral-600">
+                  Remembered your credentials?{' '}
+                  <button
+                    type="button"
+                    onClick={() => switchMode('signin')}
+                    className="font-semibold text-brand-600 hover:text-brand-700"
+                  >
+                    Back to Sign In
+                  </button>
+                </p>
+              )}
             </div>
           </div>
         </div>

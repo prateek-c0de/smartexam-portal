@@ -1,11 +1,13 @@
 import Button from '@/components/Button';
+import { isQuestionAnswered } from '@/utils/permissions';
 import type { AnswerMap, Exam } from '@/types';
-import { AlertTriangle, CheckCircle2, Flag, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Flag, Loader2, X } from 'lucide-react';
 
 interface SubmitModalProps {
   exam: Exam;
   answers: AnswerMap;
   timeRemaining: number;
+  submitting?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -14,25 +16,28 @@ export default function SubmitModal({
   exam,
   answers,
   timeRemaining,
+  submitting = false,
   onConfirm,
   onCancel,
 }: SubmitModalProps) {
-  const answered = Object.keys(answers).length;
-  const unanswered = exam.totalQuestions - answered;
+  const answered = exam.questions.filter((q) => isQuestionAnswered(answers[q.id])).length;
+  const unanswered = Math.max(0, exam.totalQuestions - answered);
+  const safeRemaining = Math.max(0, Math.floor(timeRemaining));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-fade-in">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-neutral-900/60 backdrop-blur-sm"
-        onClick={onCancel}
+        onClick={submitting ? undefined : onCancel}
       />
 
       {/* Modal */}
       <div className="relative bg-white rounded-2xl card-shadow-lg w-full max-w-md p-6 animate-slide-up">
         <button
           onClick={onCancel}
-          className="absolute top-4 right-4 p-1.5 rounded-lg text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 transition-colors"
+          disabled={submitting}
+          className="absolute top-4 right-4 p-1.5 rounded-lg text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 transition-colors disabled:opacity-50"
         >
           <X className="h-5 w-5" />
         </button>
@@ -71,7 +76,7 @@ export default function SubmitModal({
               Time Remaining
             </span>
             <span className="text-lg font-bold text-neutral-700">
-              {Math.floor(timeRemaining / 60)}:{(timeRemaining % 60).toString().padStart(2, '0')}
+              {Math.floor(safeRemaining / 60)}:{(safeRemaining % 60).toString().padStart(2, '0')}
             </span>
           </div>
         </div>
@@ -87,11 +92,18 @@ export default function SubmitModal({
 
         {/* Actions */}
         <div className="flex gap-3">
-          <Button variant="outline" fullWidth onClick={onCancel}>
+          <Button variant="outline" fullWidth onClick={onCancel} disabled={submitting}>
             Continue Exam
           </Button>
-          <Button variant="success" fullWidth onClick={onConfirm}>
-            Submit Now
+          <Button variant="success" fullWidth onClick={onConfirm} disabled={submitting}>
+            {submitting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Submitting…
+              </>
+            ) : (
+              'Submit Now'
+            )}
           </Button>
         </div>
       </div>

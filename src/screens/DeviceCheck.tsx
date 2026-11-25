@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Button from '@/components/Button';
 import ExamHeader from '@/components/ExamHeader';
 import type { DeviceCheck, User } from '@/types';
+import { detectDevice, checkInternetSpeed } from '@/utils/permissions';
 import {
   Monitor,
   Wifi,
@@ -20,7 +21,7 @@ interface DeviceCheckProps {
   user: User;
   step: number;
   stepLabels: string[];
-  onContinue: () => void;
+  onContinue: (device: DeviceCheck) => void;
   onBack: () => void;
   onLogout: () => void;
 }
@@ -36,25 +37,47 @@ export default function DeviceCheckScreen({
   const [device, setDevice] = useState<DeviceCheck | null>(null);
 
   useEffect(() => {
-    const base = {
-      ...detect(),
-      internetSpeed: 'checking' as const,
+    const controller = new AbortController();
+    const base: DeviceCheck = {
+      ...detectDevice(),
+      internetSpeed: 'checking',
     };
     setDevice(base);
-    checkSpeed().then((speed) => {
-      setDevice({ ...base, internetSpeed: speed });
+    checkInternetSpeed(controller.signal).then((speed) => {
+      if (!controller.signal.aborted) {
+        setDevice({ ...base, internetSpeed: speed });
+      }
     });
+    return () => controller.abort();
   }, []);
 
   if (!device) return null;
+
+  const isSecureMediaContext = typeof window !== 'undefined' ? window.isSecureContext : true;
 
   const checks = [
     { icon: Globe, label: 'Browser', value: `${device.browser} ${device.browserVersion}`, ok: true },
     { icon: Cpu, label: 'Operating System', value: device.os, ok: true },
     { icon: Monitor, label: 'Screen Resolution', value: device.screenResolution, ok: true },
-    { icon: Wifi, label: 'Internet Connection', value: device.internetSpeed === 'checking' ? 'Testing…' : device.internetSpeed === 'good' ? 'Good speed' : 'Slow — may affect experience', ok: device.internetSpeed !== 'poor', pending: device.internetSpeed === 'checking' },
+    {
+      icon: Wifi,
+      label: 'Internet Connection',
+      value:
+        device.internetSpeed === 'checking'
+          ? 'Testing…'
+          : device.internetSpeed === 'good'
+            ? 'Good speed'
+            : 'Slow — may affect experience',
+      ok: device.internetSpeed !== 'poor',
+      pending: device.internetSpeed === 'checking',
+    },
     { icon: Cookie, label: 'Cookies', value: device.cookiesEnabled ? 'Enabled' : 'Disabled', ok: device.cookiesEnabled },
-    { icon: ScreenShare, label: 'JavaScript', value: device.jsEnabled ? 'Enabled' : 'Disabled', ok: device.jsEnabled },
+    {
+      icon: ScreenShare,
+      label: 'Media & HTTPS Context',
+      value: isSecureMediaContext ? 'Secure context ready' : 'HTTPS required for camera/mic access',
+      ok: isSecureMediaContext && device.jsEnabled,
+    },
   ];
 
   const allPassed = checks.every((c) => c.ok && !c.pending);
@@ -115,8 +138,10 @@ export default function DeviceCheckScreen({
           <div className="flex items-center gap-3">
             {allPassed ? (
               <CheckCircle2 className="h-6 w-6 text-success-600" />
-            ) : (
+            ) : device.internetSpeed === 'checking' ? (
               <Loader2 className="h-6 w-6 text-brand-500 animate-spin" />
+            ) : (
+              <XCircle className="h-6 w-6 text-warning-600" />
             )}
             <p
               className={`text-sm font-semibold ${
@@ -142,7 +167,12 @@ export default function DeviceCheckScreen({
             <ArrowLeft className="h-4 w-4" />
             Back
           </Button>
-          <Button size="lg" onClick={onContinue} disabled={device.internetSpeed === 'checking'} className="group">
+          <Button
+            size="lg"
+            onClick={() => onContinue(device)}
+            disabled={device.internetSpeed === 'checking' || !isSecureMediaContext}
+            className="group"
+          >
             Continue
             <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
           </Button>
@@ -150,51 +180,4 @@ export default function DeviceCheckScreen({
       </div>
     </div>
   );
-}
-
-function detect() {
-  const ua = navigator.userAgent;
-  let browser = 'Unknown';
-  let browserVersion = '';
-
-  if (/Edg\/([\d.]+)/.test(ua)) {
-    browser = 'Microsoft Edge';
-    browserVersion = (ua.match(/Edg\/([\d.]+)/) || [])[1] || '';
-  } else if (/Chrome\/([\d.]+)/.test(ua)) {
-    browser = 'Google Chrome';
-    browserVersion = (ua.match(/Chrome\/([\d.]+)/) || [])[1] || '';
-  } else if (/Firefox\/([\d.]+)/.test(ua)) {
-    browser = 'Mozilla Firefox';
-    browserVersion = (ua.match(/Firefox\/([\d.]+)/) || [])[1] || '';
-  } else if (/Safari\/([\d.]+)/.test(ua)) {
-    browser = 'Safari';
-    browserVersion = (ua.match(/Version\/([\d.]+)/) || [])[1] || '';
-  }
-
-  let os = 'Unknown';
-  if (/Windows/.test(ua)) os = 'Windows';
-  else if (/Mac OS X/.test(ua)) os = 'macOS';
-  else if (/Android/.test(ua)) os = 'Android';
-  else if (/iPhone|iPad|iPod/.test(ua)) os = 'iOS';
-  else if (/Linux/.test(ua)) os = 'Linux';
-
-  return {
-    browser,
-    browserVersion,
-    os,
-    screenResolution: `${window.screen.width} × ${window.screen.height}`,
-    cookiesEnabled: navigator.cookieEnabled,
-    jsEnabled: true,
-  };
-}
-
-async function checkSpeed(): Promise<'good' | 'poor'> {
-  const start = performance.now();
-  try {
-    await fetch('https://www.gstatic.com/generate_204', { mode: 'no-cors', cache: 'no-store' }).catch(() => {});
-    const elapsed = performance.now() - start;
-    return elapsed < 500 ? 'good' : 'poor';
-  } catch {
-    return 'poor';
-  }
 }
