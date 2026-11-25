@@ -291,7 +291,9 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
     const page = await ctx.newPage();
 
     const pageErrors: string[] = [];
+    const requestedUrls: string[] = [];
     page.on('pageerror', (err) => pageErrors.push(err.message));
+    page.on('request', (req) => requestedUrls.push(req.url()));
 
     // Verify opening any deep link directly in Chrome never produces a blank white screen
     for (const deepUrl of ['/student/exam', '/student/face-check', '/student/permissions', '/teacher/dashboard', '/']) {
@@ -376,6 +378,7 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
     }, twoFacesB64);
     await expect(page.getByText(/Multiple (faces|people)/i)).toBeVisible({ timeout: 15000 });
 
+    expect(requestedUrls.some((u) => u.includes('/icons/fingerprint.js'))).toBe(false);
     expect(pageErrors).toEqual([]);
     await ctx.close();
   });

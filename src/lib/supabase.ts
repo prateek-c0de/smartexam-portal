@@ -1,6 +1,13 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? '').trim();
+const rawSupabaseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? '').trim();
+const supabaseUrl =
+  rawSupabaseUrl === 'local' ||
+  (typeof window !== 'undefined' && /^https?:\/\/(127\.0\.0\.1|localhost):54321\b/i.test(rawSupabaseUrl))
+    ? typeof window !== 'undefined'
+      ? window.location.origin
+      : 'http://127.0.0.1:54321'
+    : rawSupabaseUrl;
 const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim();
 
 export const isSupabaseConfigured =

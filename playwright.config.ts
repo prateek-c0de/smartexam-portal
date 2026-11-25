@@ -7,6 +7,7 @@ const TEST_ANON_JWT =
 
 export default defineConfig({
   testDir: './e2e',
+  reporter: 'list',
   timeout: 60000,
   fullyParallel: false,
   workers: 1,
