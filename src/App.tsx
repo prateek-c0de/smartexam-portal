@@ -329,46 +329,31 @@ export default function App() {
     );
   }
 
+  const studentPortalElement = (
+    <StudentPortalScreen
+      user={user}
+      onStartExamFlow={(exam) => {
+        setSelectedExam(exam);
+        setConsentGiven(false);
+        setStartExamError('');
+        navigate('instructions');
+      }}
+      onResumeActiveExam={(examId) => void resumeStudentSessionById(examId, user)}
+      onViewResult={(exam, res) => {
+        setSelectedExam(exam);
+        setResult(res);
+        navigate('exam-complete');
+      }}
+      onLogout={() => void handleLogout()}
+    />
+  );
+
   switch (screen) {
     case 'student-portal':
-      return (
-        <StudentPortalScreen
-          user={user}
-          onStartExamFlow={(exam) => {
-            setSelectedExam(exam);
-            setConsentGiven(false);
-            setStartExamError('');
-            navigate('instructions');
-          }}
-          onResumeActiveExam={(examId) => void resumeStudentSessionById(examId, user)}
-          onViewResult={(exam, res) => {
-            setSelectedExam(exam);
-            setResult(res);
-            navigate('exam-complete');
-          }}
-          onLogout={() => void handleLogout()}
-        />
-      );
+      return studentPortalElement;
 
     case 'instructions':
-      if (!selectedExam) {
-        return (
-          <StudentPortalScreen
-            user={user}
-            onStartExamFlow={(ex) => {
-              setSelectedExam(ex);
-              navigate('instructions');
-            }}
-            onResumeActiveExam={(examId) => void resumeStudentSessionById(examId, user)}
-            onViewResult={(ex, res) => {
-              setSelectedExam(ex);
-              setResult(res);
-              navigate('exam-complete');
-            }}
-            onLogout={() => void handleLogout()}
-          />
-        );
-      }
+      if (!selectedExam) return studentPortalElement;
       return (
         <Instructions
           user={user}
@@ -385,10 +370,7 @@ export default function App() {
       );
 
     case 'device-check':
-      if (!selectedExam) {
-        navigate('student-portal', true);
-        return null;
-      }
+      if (!selectedExam) return studentPortalElement;
       return (
         <DeviceCheckScreen
           user={user}
@@ -404,10 +386,7 @@ export default function App() {
       );
 
     case 'permissions':
-      if (!selectedExam) {
-        navigate('student-portal', true);
-        return null;
-      }
+      if (!selectedExam) return studentPortalElement;
       return (
         <PermissionsScreen
           user={user}
@@ -423,10 +402,7 @@ export default function App() {
       );
 
     case 'face-verify':
-      if (!selectedExam) {
-        navigate('student-portal', true);
-        return null;
-      }
+      if (!selectedExam) return studentPortalElement;
       return (
         <FaceVerify
           user={user}
@@ -446,7 +422,7 @@ export default function App() {
 
     case 'exam':
       if (!sessionPayload) {
-        return <ScreenFallback />;
+        return startingExam ? <ScreenFallback /> : studentPortalElement;
       }
       return (
         <Suspense fallback={<ScreenFallback />}>
@@ -469,20 +445,7 @@ export default function App() {
           onHome={() => navigate('student-portal')}
         />
       ) : (
-        <StudentPortalScreen
-          user={user}
-          onStartExamFlow={(ex) => {
-            setSelectedExam(ex);
-            navigate('instructions');
-          }}
-          onResumeActiveExam={(examId) => void resumeStudentSessionById(examId, user)}
-          onViewResult={(ex, res) => {
-            setSelectedExam(ex);
-            setResult(res);
-            navigate('exam-complete');
-          }}
-          onLogout={() => void handleLogout()}
-        />
+        studentPortalElement
       );
 
     default:

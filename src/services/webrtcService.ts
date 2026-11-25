@@ -1,5 +1,6 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from '@/lib/supabase';
+import { safeRandomUUID } from '@/utils/permissions';
 
 export function buildIceServers(): RTCIceServer[] {
   const stunRaw = String(
@@ -258,7 +259,7 @@ export class TeacherWebRTCViewer {
 
   constructor(sessionId: string, callbacks: TeacherViewerCallbacks) {
     this.sessionId = sessionId;
-    this.viewerId = crypto.randomUUID();
+    this.viewerId = safeRandomUUID();
     this.callbacks = callbacks;
   }
 

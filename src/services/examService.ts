@@ -1,4 +1,5 @@
 import { supabase, toAppError } from '@/lib/supabase';
+import { safeRandomUUID } from '@/utils/permissions';
 import type {
   ActiveExamSessionPayload,
   Exam,
@@ -444,7 +445,7 @@ export const examService = {
       p_confidence: params.confidence ?? null,
       p_duration_ms: params.durationMs ?? null,
       p_details: params.details ?? {},
-      p_client_event_id: params.clientEventId ?? crypto.randomUUID(),
+      p_client_event_id: params.clientEventId ?? safeRandomUUID(),
       p_client_ts: new Date().toISOString(),
       p_evidence_path: params.evidencePath ?? null,
     });
@@ -463,7 +464,7 @@ export const examService = {
       return null;
     }
     const ext = jpegBlob.type === 'image/webp' ? 'webp' : 'jpg';
-    const path = `${examId}/${sessionId}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext}`;
+    const path = `${examId}/${sessionId}/${Date.now()}-${safeRandomUUID().slice(0, 8)}.${ext}`;
     const { error } = await supabase.storage.from('proctoring-evidence').upload(path, jpegBlob, {
       contentType: jpegBlob.type,
       upsert: false,

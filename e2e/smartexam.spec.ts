@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const upgradedScreenshotsDir =
@@ -119,6 +119,7 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
 
     // First simulate screen-sharing permission denial, then grant on retry;
     // also block external MediaPipe CDN in this E2E run to test graceful AI model failure handling!
+    await studentPage.route('**/mediapipe/**', (route) => route.abort());
     await studentPage.route('https://cdn.jsdelivr.net/**', (route) => route.abort());
     await studentPage.route('https://storage.googleapis.com/**', (route) => route.abort());
 
@@ -273,5 +274,109 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
     await page.fill('input[type="password"]', 'PriyaPass88');
     await page.getByRole('button', { name: /Sign In as Student/i }).click();
     await expect(page.getByRole('heading', { name: /Student Examination Portal/i })).toBeVisible();
+  });
+
+  test('4. Real MediaPipe AI detects mobile phone & multiple people in camera + deep links never show white screen', async ({
+    browser,
+  }) => {
+    const fxDir = join(process.cwd(), 'e2e', 'fixtures');
+    const oneFaceB64 = `data:image/jpeg;base64,${readFileSync(join(fxDir, 'one-face.jpg')).toString('base64')}`;
+    const phoneB64 = `data:image/jpeg;base64,${readFileSync(join(fxDir, 'phone.jpg')).toString('base64')}`;
+    const twoFacesB64 = `data:image/jpeg;base64,${readFileSync(join(fxDir, 'two-faces.jpg')).toString('base64')}`;
+
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      permissions: ['camera', 'microphone'],
+    });
+    const page = await ctx.newPage();
+
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    // Verify opening any deep link directly in Chrome never produces a blank white screen
+    for (const deepUrl of ['/student/exam', '/student/face-check', '/student/permissions', '/teacher/dashboard', '/']) {
+      await page.goto(deepUrl);
+      await expect(page.locator('#root')).not.toBeEmpty();
+      const visibleText = (await page.locator('body').innerText()).trim();
+      expect(visibleText.length).toBeGreaterThan(20);
+    }
+
+    // Inject controllable photographic canvas webcam stream so real MediaPipe FaceDetector & ObjectDetector run
+    await page.addInitScript(
+      ({ initialSrc }) => {
+        const w = window as unknown as {
+          __setMockCamImage: (dataUrl: string) => void;
+        };
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx2d = canvas.getContext('2d')!;
+        const img = new Image();
+        img.src = initialSrc;
+
+        setInterval(() => {
+          if (img.complete && img.naturalWidth > 0) {
+            ctx2d.fillStyle = '#222';
+            ctx2d.fillRect(0, 0, 640, 480);
+            ctx2d.drawImage(img, 0, 0, 640, 480);
+          }
+        }, 66);
+
+        w.__setMockCamImage = (dataUrl: string) => {
+          img.src = dataUrl;
+        };
+
+        const origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+        navigator.mediaDevices.getUserMedia = async (constraints) => {
+          if (constraints && typeof constraints === 'object' && constraints.video) {
+            return canvas.captureStream(15);
+          }
+          return origGetUserMedia(constraints);
+        };
+        navigator.mediaDevices.getDisplayMedia = async () => canvas.captureStream(5);
+      },
+      { initialSrc: oneFaceB64 }
+    );
+
+    await page.goto('/');
+    await page.getByRole('button', { name: /Student Portal/i }).click();
+    await page.fill('input[type="email"]', 'ai.tester@college.edu');
+    await page.fill('input[type="password"]', 'AiTester#99');
+    await page.getByRole('button', { name: /Sign In as Student/i }).click();
+
+    await page.fill('input[placeholder*="8-character"]', 'CS492FXN');
+    await page.getByRole('button', { name: /Join Exam/i }).click();
+    await page.getByRole('button', { name: /Begin Check-in/i }).first().click();
+
+    await page.locator('input[type="checkbox"]').check();
+    await page.getByRole('button', { name: /I Understand — Continue/i }).click();
+    await page.getByRole('button', { name: /Continue/i }).click();
+
+    for (let i = 0; i < 3; i++) {
+      await page.getByRole('button', { name: /Allow/i }).first().click();
+    }
+    await page.getByRole('button', { name: /Continue to Camera Check/i }).click();
+
+    // Real MediaPipe BlazeFace confirms 1 centered human face!
+    await expect(page.getByText(/Face Presence Confirmed!/i)).toBeVisible({ timeout: 20000 });
+    await page.getByRole('button', { name: /Start Exam/i }).click();
+
+    // Wait for both MediaPipe FaceDetector + ObjectDetector to initialize locally
+    await expect(page.getByText(/AI Vision Active/i)).toBeVisible({ timeout: 20000 });
+
+    // 1. Show mobile phone in camera -> expect real AI phone_detected flag!
+    await page.evaluate((src) => {
+      (window as unknown as { __setMockCamImage: (s: string) => void }).__setMockCamImage(src);
+    }, phoneB64);
+    await expect(page.getByText(/Mobile phone detected in camera frame/i)).toBeVisible({ timeout: 15000 });
+
+    // 2. Show multiple people/faces in camera -> expect real AI multiple_faces flag!
+    await page.evaluate((src) => {
+      (window as unknown as { __setMockCamImage: (s: string) => void }).__setMockCamImage(src);
+    }, twoFacesB64);
+    await expect(page.getByText(/Multiple (faces|people)/i)).toBeVisible({ timeout: 15000 });
+
+    expect(pageErrors).toEqual([]);
+    await ctx.close();
   });
 });

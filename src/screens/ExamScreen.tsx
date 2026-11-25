@@ -13,7 +13,7 @@ import type {
   StudentAnswerDraft,
   User,
 } from '@/types';
-import { captureFrame, formatTime, isQuestionAnswered, stopStream } from '@/utils/permissions';
+import { captureFrame, formatTime, isQuestionAnswered, safeRandomUUID, stopStream } from '@/utils/permissions';
 import { offlineExamStore } from '@/utils/offlineExamStore';
 import { examService } from '@/services/examService';
 import { StudentWebRTCResponder } from '@/services/webrtcService';
@@ -125,6 +125,8 @@ export default function ExamScreen({
   const [submitError, setSubmitError] = useState('');
   const [showProctorCam, setShowProctorCam] = useState(true);
   const [tabWarnings, setTabWarnings] = useState(session.proctoringFlags);
+  const [latestFlagReason, setLatestFlagReason] = useState('');
+  const [aiVisionReady, setAiVisionReady] = useState(false);
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
@@ -151,7 +153,7 @@ export default function ExamScreen({
   draftsRef.current = drafts;
   const dirtySetRef = useRef<Set<string>>(new Set(initialState.current.dirtyIds));
   const saveTimerRef = useRef<number | null>(null);
-  const submitKeyRef = useRef<string>(crypto.randomUUID());
+  const submitKeyRef = useRef<string>(safeRandomUUID());
   const isFinishedRef = useRef(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -199,6 +201,20 @@ export default function ExamScreen({
       }
     ) => {
       if (isFinishedRef.current) return;
+      const isSuspicious = ![
+        'camera_interrupted',
+        'mic_interrupted',
+        'network_offline',
+        'network_restored',
+        'monitoring_error',
+        'page_reload',
+      ].includes(eventType);
+
+      if (isSuspicious) {
+        setLatestFlagReason(description);
+        setTabWarnings((prev) => Math.max(1, prev + 1));
+      }
+
       try {
         let evidencePath: string | null = null;
         if (
@@ -484,6 +500,9 @@ export default function ExamScreen({
       getVideoElement: () => videoRef.current,
       getAudioStream: () => micStreamRef.current,
       config: exam.proctoringConfig,
+      onStatusChange: (st) => {
+        setAiVisionReady(st.faceModelReady && st.objectModelReady);
+      },
       onSignal: (sig) => {
         void reportEvent(sig.eventType, sig.description, {
           confidence: sig.confidence,
@@ -520,7 +539,6 @@ export default function ExamScreen({
   useEffect(() => {
     function handleVisibility() {
       if (document.hidden && !isFinishedRef.current) {
-        setTabWarnings((w) => w + 1);
         void reportEvent('tab_switch', 'Student switched away from the examination tab.');
       }
     }
@@ -827,7 +845,10 @@ export default function ExamScreen({
       {tabWarnings > 0 && (
         <div className="bg-error-600 text-white px-4 py-2 flex items-center gap-2 text-sm font-semibold animate-fade-in">
           <AlertCircle className="h-4 w-4 flex-shrink-0" />
-          Notice: {tabWarnings} proctoring flag{tabWarnings > 1 ? 's' : ''} recorded during this session for instructor review.
+          <span>
+            {latestFlagReason ? `${latestFlagReason} — ` : ''}
+            {tabWarnings} proctoring flag{tabWarnings > 1 ? 's' : ''} recorded during this session.
+          </span>
         </div>
       )}
 
@@ -1007,6 +1028,11 @@ export default function ExamScreen({
                 <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-1 rounded-full bg-error-600/80">
                   <span className="h-2 w-2 rounded-full bg-white animate-pulse" />
                   <span className="text-xs font-bold text-white">LIVE</span>
+                </div>
+                <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-full bg-black/65 backdrop-blur-sm">
+                  <span className={`text-[10px] font-bold ${aiVisionReady ? 'text-success-400' : 'text-neutral-300'}`}>
+                    {aiVisionReady ? 'AI Vision Active' : 'Initializing AI…'}
+                  </span>
                 </div>
               </div>
             )}

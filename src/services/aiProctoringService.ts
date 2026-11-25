@@ -1,15 +1,14 @@
 import type { ProctoringConfig, ProctoringEventType } from '@/types';
 
-const DEFAULT_WASM_ROOT =
-  String(import.meta.env.VITE_MEDIAPIPE_WASM_ROOT ?? '').trim() ||
-  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
+const LOCAL_WASM_ROOT = '/mediapipe/wasm';
+const CDN_WASM_ROOT = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm';
 
-const DEFAULT_FACE_MODEL =
-  String(import.meta.env.VITE_MEDIAPIPE_FACE_MODEL_URL ?? '').trim() ||
+const LOCAL_FACE_MODEL = '/mediapipe/blaze_face_short_range.tflite';
+const CDN_FACE_MODEL =
   'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
 
-const DEFAULT_OBJECT_MODEL =
-  String(import.meta.env.VITE_MEDIAPIPE_OBJECT_MODEL_URL ?? '').trim() ||
+const LOCAL_OBJECT_MODEL = '/mediapipe/efficientdet_lite0.tflite';
+const CDN_OBJECT_MODEL =
   'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite';
 
 type VisionModule = typeof import('@mediapipe/tasks-vision');
@@ -30,21 +29,33 @@ async function loadVisionModule(): Promise<VisionModule> {
 export async function getSharedFaceDetector(): Promise<FaceDetectorInstance | null> {
   if (!sharedFaceDetectorPromise) {
     sharedFaceDetectorPromise = (async () => {
-      try {
-        const vision = await loadVisionModule();
-        const fileset = await vision.FilesetResolver.forVisionTasks(DEFAULT_WASM_ROOT);
-        return await vision.FaceDetector.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: DEFAULT_FACE_MODEL,
-            delegate: 'CPU',
-          },
-          runningMode: 'IMAGE',
-          minDetectionConfidence: 0.55,
-        });
-      } catch {
-        sharedFaceDetectorPromise = null;
-        return null;
+      const vision = await loadVisionModule();
+      const customWasm = String(import.meta.env.VITE_MEDIAPIPE_WASM_ROOT ?? '').trim();
+      const customModel = String(import.meta.env.VITE_MEDIAPIPE_FACE_MODEL_URL ?? '').trim();
+
+      const candidates: Array<{ wasm: string; model: string }> = [
+        { wasm: customWasm || LOCAL_WASM_ROOT, model: customModel || LOCAL_FACE_MODEL },
+        { wasm: CDN_WASM_ROOT, model: CDN_FACE_MODEL },
+      ];
+
+      for (const cand of candidates) {
+        try {
+          const fileset = await vision.FilesetResolver.forVisionTasks(cand.wasm);
+          return await vision.FaceDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: cand.model,
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE',
+            minDetectionConfidence: 0.35,
+          });
+        } catch {
+          // Try next candidate
+        }
       }
+
+      sharedFaceDetectorPromise = null;
+      return null;
     })();
   }
   return sharedFaceDetectorPromise;
@@ -53,23 +64,35 @@ export async function getSharedFaceDetector(): Promise<FaceDetectorInstance | nu
 export async function getSharedObjectDetector(): Promise<ObjectDetectorInstance | null> {
   if (!sharedObjectDetectorPromise) {
     sharedObjectDetectorPromise = (async () => {
-      try {
-        const vision = await loadVisionModule();
-        const fileset = await vision.FilesetResolver.forVisionTasks(DEFAULT_WASM_ROOT);
-        return await vision.ObjectDetector.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: DEFAULT_OBJECT_MODEL,
-            delegate: 'CPU',
-          },
-          runningMode: 'IMAGE',
-          scoreThreshold: 0.45,
-          maxResults: 6,
-          categoryAllowlist: ['person', 'cell phone', 'book', 'laptop'],
-        });
-      } catch {
-        sharedObjectDetectorPromise = null;
-        return null;
+      const vision = await loadVisionModule();
+      const customWasm = String(import.meta.env.VITE_MEDIAPIPE_WASM_ROOT ?? '').trim();
+      const customModel = String(import.meta.env.VITE_MEDIAPIPE_OBJECT_MODEL_URL ?? '').trim();
+
+      const candidates: Array<{ wasm: string; model: string }> = [
+        { wasm: customWasm || LOCAL_WASM_ROOT, model: customModel || LOCAL_OBJECT_MODEL },
+        { wasm: CDN_WASM_ROOT, model: CDN_OBJECT_MODEL },
+      ];
+
+      for (const cand of candidates) {
+        try {
+          const fileset = await vision.FilesetResolver.forVisionTasks(cand.wasm);
+          return await vision.ObjectDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: cand.model,
+              delegate: 'CPU',
+            },
+            runningMode: 'IMAGE',
+            scoreThreshold: 0.25,
+            maxResults: 10,
+            categoryAllowlist: ['person', 'cell phone', 'book', 'laptop'],
+          });
+        } catch {
+          // Try next candidate
+        }
       }
+
+      sharedObjectDetectorPromise = null;
+      return null;
     })();
   }
   return sharedObjectDetectorPromise;
@@ -110,9 +133,27 @@ export function analyzeFrameLuminance(
   }
   const stdDev = Math.sqrt(varianceSum / pixelCount);
 
-  // Very dark frame OR near-uniform covered/taped camera lens
   const isObstructed = mean < 14 || stdDev < 4.0;
   return { mean, stdDev, isObstructed };
+}
+
+interface BBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function boxIoU(a: BBox, b: BBox): number {
+  const ix1 = Math.max(a.x, b.x);
+  const iy1 = Math.max(a.y, b.y);
+  const ix2 = Math.min(a.x + a.w, b.x + b.w);
+  const iy2 = Math.min(a.y + a.h, b.y + b.h);
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  const union = a.w * a.h + b.w * b.h - inter;
+  return union > 0 ? inter / union : 0;
 }
 
 export interface FaceCheckFrameResult {
@@ -137,8 +178,8 @@ export async function inspectVideoForFaceCheck(video: HTMLVideoElement): Promise
   }
 
   const canvas = document.createElement('canvas');
-  canvas.width = 320;
-  canvas.height = Math.max(180, Math.round((video.videoHeight / video.videoWidth) * 320));
+  canvas.width = 480;
+  canvas.height = Math.max(270, Math.round((video.videoHeight / video.videoWidth) * 480));
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     return { modelLoaded: false, faceCount: 0, confidence: 0, centered: false, isObstructed: true, luminance: 0 };
@@ -171,7 +212,7 @@ export async function inspectVideoForFaceCheck(video: HTMLVideoElement): Promise
 
   const res = detector.detect(canvas);
   const validFaces = (res.detections ?? []).filter(
-    (d) => (d.categories?.[0]?.score ?? 0) >= 0.55
+    (d) => (d.categories?.[0]?.score ?? 0) >= 0.48
   );
 
   if (validFaces.length !== 1) {
@@ -194,7 +235,7 @@ export async function inspectVideoForFaceCheck(video: HTMLVideoElement): Promise
     const cx = (box.originX + box.width / 2) / canvas.width;
     const cy = (box.originY + box.height / 2) / canvas.height;
     const relWidth = box.width / canvas.width;
-    centered = cx >= 0.2 && cx <= 0.8 && cy >= 0.15 && cy <= 0.85 && relWidth >= 0.12;
+    centered = cx >= 0.15 && cx <= 0.85 && cy >= 0.12 && cy <= 0.88 && relWidth >= 0.10;
   }
 
   return {
@@ -224,12 +265,34 @@ export interface AIProctoringCallbacks {
   onStatusChange?: (status: { faceModelReady: boolean; objectModelReady: boolean; audioReady: boolean }) => void;
 }
 
+class RollingHitWindow {
+  private readonly size: number;
+  private buffer: boolean[] = [];
+
+  constructor(size: number) {
+    this.size = size;
+  }
+
+  push(hit: boolean): number {
+    this.buffer.push(hit);
+    if (this.buffer.length > this.size) {
+      this.buffer.shift();
+    }
+    return this.buffer.filter(Boolean).length;
+  }
+
+  clear(): void {
+    this.buffer = [];
+  }
+}
+
 export class AIProctoringMonitor {
   private readonly cb: AIProctoringCallbacks;
   private faceTimer: number | null = null;
   private objectTimer: number | null = null;
   private audioTimer: number | null = null;
   private frameCanvas: HTMLCanvasElement;
+  private cropCanvas: HTMLCanvasElement;
   private lumCanvas: HTMLCanvasElement;
 
   private audioCtx: AudioContext | null = null;
@@ -238,8 +301,15 @@ export class AIProctoringMonitor {
   private boundAudioStreamId: string | null = null;
   private ambientFloor = 0.018;
 
-  private conditionSince: Partial<Record<ProctoringEventType, number>> = {};
+  private conditionSince: Partial<Record<string, number>> = {};
   private lastEmittedAt: Partial<Record<ProctoringEventType, number>> = {};
+
+  // Separate rolling windows so FaceDetector and ObjectDetector never cancel each other out
+  private multiFaceWindow = new RollingHitWindow(3);
+  private multiPersonWindow = new RollingHitWindow(3);
+  private phoneWindow = new RollingHitWindow(4);
+  private bookWindow = new RollingHitWindow(3);
+
   private faceBusy = false;
   private objectBusy = false;
   private disposed = false;
@@ -247,8 +317,11 @@ export class AIProctoringMonitor {
   constructor(callbacks: AIProctoringCallbacks) {
     this.cb = callbacks;
     this.frameCanvas = document.createElement('canvas');
-    this.frameCanvas.width = 320;
-    this.frameCanvas.height = 240;
+    this.frameCanvas.width = 480;
+    this.frameCanvas.height = 360;
+    this.cropCanvas = document.createElement('canvas');
+    this.cropCanvas.width = 320;
+    this.cropCanvas.height = 240;
     this.lumCanvas = document.createElement('canvas');
   }
 
@@ -289,13 +362,13 @@ export class AIProctoringMonitor {
     if (enableFace) {
       this.faceTimer = window.setInterval(() => {
         void this.runFacePass();
-      }, 1200);
+      }, 850);
     }
 
     if (enableObj && objDet) {
       this.objectTimer = window.setInterval(() => {
         void this.runObjectPass();
-      }, 2600);
+      }, 900);
     }
 
     if (enableAudio) {
@@ -307,39 +380,42 @@ export class AIProctoringMonitor {
 
   private getSustainMs(type: ProctoringEventType, fallbackSec: number): number {
     const sec = this.cb.config?.sustain_seconds?.[type] ?? fallbackSec;
-    return Math.max(500, sec * 1000);
+    return Math.max(400, sec * 1000);
   }
 
   private getMinConfidence(type: ProctoringEventType, fallback: number): number {
-    return this.cb.config?.min_confidence?.[type] ?? fallback;
+    const configured = this.cb.config?.min_confidence?.[type];
+    // Cap overly strict legacy thresholds so real webcam detections aren't discarded
+    if (type === 'phone_detected') return Math.min(configured ?? fallback, 0.38);
+    if (type === 'multiple_faces') return Math.min(configured ?? fallback, 0.42);
+    return configured ?? fallback;
   }
 
-  private getCooldownMs(type: ProctoringEventType, fallbackSec = 25): number {
+  private getCooldownMs(type: ProctoringEventType, fallbackSec = 12): number {
     const sec =
       this.cb.config?.cooldown_seconds?.[type] ??
       this.cb.config?.cooldown_seconds?.default ??
       fallbackSec;
-    return Math.max(2000, sec * 1000);
+    return Math.max(2000, Math.min(sec, 15) * 1000);
   }
 
   private trackSustained(
-    type: ProctoringEventType,
+    key: string,
     active: boolean,
     sustainMs: number,
     buildSignal: (durationMs: number) => DetectedProctoringSignal
   ): void {
     const now = Date.now();
     if (!active) {
-      delete this.conditionSince[type];
+      delete this.conditionSince[key];
       return;
     }
-    const since = this.conditionSince[type] ?? now;
-    this.conditionSince[type] = since;
+    const since = this.conditionSince[key] ?? now;
+    this.conditionSince[key] = since;
     const elapsed = now - since;
     if (elapsed >= sustainMs) {
       this.emitWithCooldown(buildSignal(elapsed));
-      // Reset sustain timer after emission so next alert requires another sustained window
-      this.conditionSince[type] = now;
+      this.conditionSince[key] = now;
     }
   }
 
@@ -375,7 +451,7 @@ export class AIProctoringMonitor {
       this.trackSustained(
         'camera_obstructed',
         lum.isObstructed,
-        this.getSustainMs('camera_obstructed', 3),
+        this.getSustainMs('camera_obstructed', 2),
         (durationMs) => ({
           eventType: 'camera_obstructed',
           description: 'Camera feed appears dark or obstructed for a sustained period.',
@@ -388,22 +464,87 @@ export class AIProctoringMonitor {
 
       if (lum.isObstructed) {
         delete this.conditionSince.face_not_detected;
-        delete this.conditionSince.multiple_faces;
+        this.multiFaceWindow.clear();
         return;
       }
 
       const detector = await getSharedFaceDetector();
       if (!detector || this.disposed) return;
 
+      const minMultiConf = this.getMinConfidence('multiple_faces', 0.35);
       const res = detector.detect(this.frameCanvas);
-      const minMultiConf = this.getMinConfidence('multiple_faces', 0.6);
-      const faces = (res.detections ?? []).filter((d) => (d.categories?.[0]?.score ?? 0) >= 0.52);
-      const highConfFaces = faces.filter((d) => (d.categories?.[0]?.score ?? 0) >= minMultiConf);
+      const rawFaces = (res.detections ?? []).filter(
+        (d) => (d.categories?.[0]?.score ?? 0) >= minMultiConf
+      );
+
+      // Deduplicate overlapping face boxes
+      const uniqueFaces: Array<{ box: BBox; score: number }> = [];
+      for (const det of rawFaces) {
+        const b = det.boundingBox;
+        const score = det.categories?.[0]?.score ?? 0;
+        if (!b) continue;
+        const candidate: BBox = { x: b.originX, y: b.originY, w: b.width, h: b.height };
+        if (!uniqueFaces.some((u) => boxIoU(u.box, candidate) > 0.35)) {
+          uniqueFaces.push({ box: candidate, score });
+        }
+      }
+
+      // Secondary zoomed background scan when full-frame found 1 primary face:
+      // Masks out the primary student's face and checks the upper room area so a smaller
+      // 2nd face standing behind the student's left/right shoulder is detected!
+      if (uniqueFaces.length === 1) {
+        const primary = uniqueFaces[0].box;
+        const cropCtx = this.cropCanvas.getContext('2d');
+        if (cropCtx) {
+          // Zoom into upper 78% of frame where background heads appear
+          const srcH = Math.round(this.frameCanvas.height * 0.78);
+          cropCtx.drawImage(
+            this.frameCanvas,
+            0,
+            0,
+            this.frameCanvas.width,
+            srcH,
+            0,
+            0,
+            this.cropCanvas.width,
+            this.cropCanvas.height
+          );
+          const scaleX = this.cropCanvas.width / this.frameCanvas.width;
+          const scaleY = this.cropCanvas.height / srcH;
+          const padX = primary.w * 0.18;
+          const padY = primary.h * 0.18;
+          cropCtx.fillStyle = '#808080';
+          cropCtx.fillRect(
+            (primary.x - padX) * scaleX,
+            (primary.y - padY) * scaleY,
+            (primary.w + padX * 2) * scaleX,
+            (primary.h + padY * 2) * scaleY
+          );
+
+          const bgRes = detector.detect(this.cropCanvas);
+          for (const bgDet of bgRes.detections ?? []) {
+            const bgScore = bgDet.categories?.[0]?.score ?? 0;
+            const bb = bgDet.boundingBox;
+            if (bgScore < Math.max(0.42, minMultiConf) || !bb) continue;
+            // Map back to full-frame coordinates and ensure it does not overlap primary face
+            const mapped: BBox = {
+              x: bb.originX / scaleX,
+              y: bb.originY / scaleY,
+              w: bb.width / scaleX,
+              h: bb.height / scaleY,
+            };
+            if (boxIoU(primary, mapped) < 0.15) {
+              uniqueFaces.push({ box: mapped, score: bgScore });
+              break;
+            }
+          }
+        }
+      }
 
       this.trackSustained(
         'face_not_detected',
-        faces.length === 0,
-        this.getSustainMs('face_not_detected', 5),
+        uniqueFaces.length === 0,
+        this.getSustainMs('face_not_detected', 3),
         (durationMs) => ({
           eventType: 'face_not_detected',
           description: `No face detected in camera frame for ${Math.round(durationMs / 1000)}s.`,
@@ -412,23 +553,23 @@ export class AIProctoringMonitor {
         })
       );
 
-      const topMultiConf = highConfFaces.reduce(
-        (m, d) => Math.max(m, d.categories?.[0]?.score ?? 0),
-        0
-      );
-      this.trackSustained(
-        'multiple_faces',
-        highConfFaces.length >= 2,
-        this.getSustainMs('multiple_faces', 2),
-        (durationMs) => ({
+      const isMultiFace = uniqueFaces.length >= 2;
+      const multiHits = this.multiFaceWindow.push(isMultiFace);
+      const topMultiConf = uniqueFaces.reduce((m, f) => Math.max(m, f.score), 0);
+      const strongImmediate =
+        isMultiFace && uniqueFaces.every((f) => f.score >= 0.65);
+
+      if (isMultiFace && (strongImmediate || multiHits >= 2)) {
+        this.multiFaceWindow.clear();
+        this.emitWithCooldown({
           eventType: 'multiple_faces',
-          description: `Multiple faces (${highConfFaces.length}) visible in camera frame.`,
+          description: `Multiple faces (${uniqueFaces.length}) visible in camera frame.`,
           confidence: Number(topMultiConf.toFixed(3)),
-          durationMs,
-          details: { count: highConfFaces.length },
+          durationMs: 1500,
+          details: { count: uniqueFaces.length, detector: 'face' },
           captureSnapshot: true,
-        })
-      );
+        });
+      }
     } catch {
       // Non-fatal frame error
     } finally {
@@ -444,19 +585,16 @@ export class AIProctoringMonitor {
       const detector = await getSharedObjectDetector();
       if (!detector || this.disposed) return;
 
-      const res = detector.detect(this.frameCanvas);
-      const detections = res.detections ?? [];
-
-      const phoneMin = this.getMinConfidence('phone_detected', 0.55);
-      const objMin = this.getMinConfidence('prohibited_object', 0.6);
-      const personMin = this.getMinConfidence('multiple_faces', 0.6);
+      const phoneMin = this.getMinConfidence('phone_detected', 0.32);
+      const objMin = this.getMinConfidence('prohibited_object', 0.38);
+      const personMin = Math.max(0.36, this.getMinConfidence('multiple_faces', 0.35));
 
       let bestPhone = 0;
       let bestBook = 0;
-      let personCount = 0;
-      let bestPerson = 0;
+      const personBoxes: Array<{ box: BBox; score: number }> = [];
 
-      for (const det of detections) {
+      const fullRes = detector.detect(this.frameCanvas);
+      for (const det of fullRes.detections ?? []) {
         const cat = det.categories?.[0];
         if (!cat) continue;
         const name = cat.categoryName?.toLowerCase() ?? '';
@@ -465,54 +603,96 @@ export class AIProctoringMonitor {
           bestPhone = Math.max(bestPhone, score);
         } else if (name === 'book' && score >= objMin) {
           bestBook = Math.max(bestBook, score);
-        } else if (name === 'person' && score >= personMin) {
-          personCount += 1;
-          bestPerson = Math.max(bestPerson, score);
+        } else if (name === 'person' && score >= personMin && det.boundingBox) {
+          const cand: BBox = {
+            x: det.boundingBox.originX,
+            y: det.boundingBox.originY,
+            w: det.boundingBox.width,
+            h: det.boundingBox.height,
+          };
+          if (!personBoxes.some((p) => boxIoU(p.box, cand) > 0.50)) {
+            personBoxes.push({ box: cand, score });
+          }
         }
       }
 
-      this.trackSustained(
-        'phone_detected',
-        bestPhone >= phoneMin,
-        this.getSustainMs('phone_detected', 2),
-        (durationMs) => ({
+      // Hand/desk lower-zone zoom scan if full-frame did not already detect a phone:
+      // Catches smartphones held low near chest, chin, or desk edge!
+      if (bestPhone < phoneMin) {
+        const cropCtx = this.cropCanvas.getContext('2d');
+        if (cropCtx) {
+          const sx = Math.round(this.frameCanvas.width * 0.08);
+          const sy = Math.round(this.frameCanvas.height * 0.22);
+          const sw = Math.round(this.frameCanvas.width * 0.84);
+          const sh = this.frameCanvas.height - sy;
+          cropCtx.drawImage(
+            this.frameCanvas,
+            sx,
+            sy,
+            sw,
+            sh,
+            0,
+            0,
+            this.cropCanvas.width,
+            this.cropCanvas.height
+          );
+          const zoomRes = detector.detect(this.cropCanvas);
+          for (const det of zoomRes.detections ?? []) {
+            const cat = det.categories?.[0];
+            if (!cat) continue;
+            const name = cat.categoryName?.toLowerCase() ?? '';
+            const score = cat.score ?? 0;
+            if (name === 'cell phone' && score >= phoneMin) {
+              bestPhone = Math.max(bestPhone, score);
+            }
+          }
+        }
+      }
+
+      // 1. Mobile Phone rolling-window confirmation (immediate if >= 0.50, or 2-of-4 recent frames)
+      const hasPhone = bestPhone >= phoneMin;
+      const phoneHits = this.phoneWindow.push(hasPhone);
+      if (hasPhone && (bestPhone >= 0.50 || phoneHits >= 2)) {
+        this.phoneWindow.clear();
+        this.emitWithCooldown({
           eventType: 'phone_detected',
           description: 'Mobile phone detected in camera frame (flagged for instructor review).',
           confidence: Number(bestPhone.toFixed(3)),
-          durationMs,
+          durationMs: 1200,
           details: { object: 'cell phone' },
           captureSnapshot: true,
-        })
-      );
+        });
+      }
 
-      this.trackSustained(
-        'prohibited_object',
-        bestBook >= objMin,
-        this.getSustainMs('prohibited_object', 3),
-        (durationMs) => ({
+      // 2. Reference Book rolling-window confirmation (2-of-3 recent frames)
+      const hasBook = bestBook >= objMin;
+      const bookHits = this.bookWindow.push(hasBook);
+      if (hasBook && bookHits >= 2) {
+        this.bookWindow.clear();
+        this.emitWithCooldown({
           eventType: 'prohibited_object',
           description: 'Reference book/material detected in camera frame (flagged for review).',
           confidence: Number(bestBook.toFixed(3)),
-          durationMs,
+          durationMs: 1800,
           details: { object: 'book' },
           captureSnapshot: true,
-        })
-      );
+        });
+      }
 
-      if (personCount >= 2) {
-        this.trackSustained(
-          'multiple_faces',
-          true,
-          this.getSustainMs('multiple_faces', 2),
-          (durationMs) => ({
-            eventType: 'multiple_faces',
-            description: `Multiple people (${personCount}) detected in the examination area.`,
-            confidence: Number(bestPerson.toFixed(3)),
-            durationMs,
-            details: { personCount },
-            captureSnapshot: true,
-          })
-        );
+      // 3. Multi-person detection (independent from multiFaceWindow so neither cancels the other!)
+      const hasMultiPerson = personBoxes.length >= 2;
+      const personHits = this.multiPersonWindow.push(hasMultiPerson);
+      if (hasMultiPerson && personHits >= 2) {
+        const bestPerson = personBoxes.reduce((m, p) => Math.max(m, p.score), 0);
+        this.multiPersonWindow.clear();
+        this.emitWithCooldown({
+          eventType: 'multiple_faces',
+          description: `Multiple people (${personBoxes.length}) detected in the examination area.`,
+          confidence: Number(bestPerson.toFixed(3)),
+          durationMs: 1800,
+          details: { personCount: personBoxes.length, detector: 'object_person' },
+          captureSnapshot: true,
+        });
       }
     } catch {
       // Non-fatal frame error
@@ -528,7 +708,9 @@ export class AIProctoringMonitor {
 
     this.teardownAudioGraph();
     try {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
       this.audioCtx = new AudioCtx();
       this.analyser = this.audioCtx.createAnalyser();
@@ -573,7 +755,6 @@ export class AIProctoringMonitor {
     const speechAvg = speechSum / Math.max(1, highBin - lowBin + 1);
     const totalAvg = totalSum / Math.max(1, binCount - 1);
 
-    // Slowly adapt ambient noise floor during quiet moments
     if (speechAvg < this.ambientFloor * 1.6) {
       this.ambientFloor = Math.max(0.012, Math.min(0.08, this.ambientFloor * 0.95 + speechAvg * 0.05));
     }
