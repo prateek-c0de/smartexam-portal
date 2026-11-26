@@ -26,13 +26,13 @@ export default defineConfig({
     {
       command: 'node e2e/supabaseTestServer.mjs',
       url: 'http://127.0.0.1:54399/auth/v1/recover',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30000,
     },
     {
-      command: 'npx vite --port 5198 --strictPort --host 127.0.0.1',
+      command: 'node ./node_modules/vite/bin/vite.js --port 5198 --strictPort --host 127.0.0.1',
       url: 'http://127.0.0.1:5198/',
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30000,
       env: {
         VITE_SUPABASE_URL: 'http://127.0.0.1:54399',

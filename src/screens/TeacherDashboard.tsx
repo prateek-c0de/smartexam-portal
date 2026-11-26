@@ -94,6 +94,7 @@ const PAGE_SIZE = 15;
 export default function TeacherDashboard({ user, onLogout }: TeacherDashboardProps) {
   const [selectedExamId, setSelectedExamId] = useState<string>('');
   const [dashboard, setDashboard] = useState<TeacherDashboardPayload | null>(null);
+  const [liveHallSessions, setLiveHallSessions] = useState<TeacherSessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -122,9 +123,13 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       if (!silent) setLoading(true);
       setError('');
       try {
-        const data = await examService.getTeacherDashboard(selectedExamId || null);
+        const [data, activeHall] = await Promise.all([
+          examService.getTeacherDashboard(selectedExamId || null),
+          examService.getLiveHallSessions().catch(() => [] as TeacherSessionSummary[]),
+        ]);
         setDashboard(data);
-        if (!selectedExamId && data.exams.length === 1) {
+        setLiveHallSessions(activeHall);
+        if (!selectedExamId && data.exams.length === 1 && activeHall.length === 0) {
           setSelectedExamId(data.exams[0].id);
         }
       } catch (err) {
@@ -139,6 +144,12 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
 
   useEffect(() => {
     void fetchDashboard(false);
+    // Continuous 4-second background sync alongside Realtime WebSockets so any student
+    // starting an exam immediately registers on the Teacher Portal without manual refresh.
+    const pollId = window.setInterval(() => {
+      void fetchDashboard(true);
+    }, 4000);
+    return () => window.clearInterval(pollId);
   }, [fetchDashboard]);
 
   // Load pending faculty requests if administrator
@@ -196,9 +207,20 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
   }, [dashboard, selectedExamId]);
 
   const rows: UnifiedStudentRow[] = useMemo(() => {
-    if (!dashboard) return [];
+    if (!dashboard && liveHallSessions.length === 0) return [];
 
-    const sessionRows: UnifiedStudentRow[] = dashboard.sessions.map((s) => {
+    // Merge owned exam sessions with any active portal-wide in_progress student sessions
+    const mergedSessionsMap = new Map<string, TeacherSessionSummary>();
+    for (const s of dashboard?.sessions ?? []) {
+      mergedSessionsMap.set(s.id, s);
+    }
+    for (const liveS of liveHallSessions) {
+      if (!selectedExamId || liveS.exam_id === selectedExamId) {
+        mergedSessionsMap.set(liveS.id, liveS);
+      }
+    }
+
+    const sessionRows: UnifiedStudentRow[] = Array.from(mergedSessionsMap.values()).map((s) => {
       let uiStatus: UnifiedStudentRow['uiStatus'] = 'completed';
       if (s.status === 'flagged' || s.review_priority === 'high') {
         uiStatus = 'flagged';
@@ -246,7 +268,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
       };
     });
 
-    const unstartedRows: UnifiedStudentRow[] = dashboard.unstarted_roster.map((u, idx) => ({
+    const unstartedRows: UnifiedStudentRow[] = (dashboard?.unstarted_roster ?? []).map((u, idx) => ({
       key: `roster-${u.exam_id}-${u.student_email}-${idx}`,
       sessionId: null,
       sessionObj: null,
@@ -269,7 +291,7 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
     }));
 
     return [...sessionRows, ...unstartedRows];
-  }, [dashboard]);
+  }, [dashboard, liveHallSessions, selectedExamId]);
 
   const filteredAndSorted = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -731,6 +753,89 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
           </div>
         )}
 
+        {/* Live Examination Hall — Active Students Currently Giving Exam */}
+        {liveHallSessions.length > 0 && (
+          <div className="bg-white rounded-2xl card-shadow p-5 mb-6 border border-success-200 animate-fade-in">
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+              <div className="flex items-center gap-2.5">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-success-600" />
+                </span>
+                <h2 className="text-base font-bold text-neutral-900">
+                  Live Examination Hall — {liveHallSessions.length} Student{liveHallSessions.length === 1 ? '' : 's'} Giving Exam Now
+                </h2>
+              </div>
+              <span className="text-xs font-medium text-neutral-500">
+                Click &ldquo;Peek Live&rdquo; on any student to view live camera, listen/record microphone &amp; monitor screen
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {liveHallSessions.map((s) => (
+                <div
+                  key={s.id}
+                  className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 flex flex-col justify-between gap-3"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div
+                        className="flex items-center justify-center h-9 w-9 rounded-full text-white text-sm font-bold flex-shrink-0"
+                        style={{ backgroundColor: pickAvatarColor(s.student_email) }}
+                      >
+                        {s.student_name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-neutral-900 truncate">{s.student_name}</p>
+                        <p className="text-xs text-neutral-500 truncate">{s.student_email}</p>
+                      </div>
+                    </div>
+                    {s.proctoring_flags > 0 ? (
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-error-50 text-error-700 flex-shrink-0">
+                        {s.proctoring_flags} flag{s.proctoring_flags > 1 ? 's' : ''}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-success-50 text-success-700 flex-shrink-0">
+                        Live
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between text-xs text-neutral-600">
+                    <span className="font-medium truncate">
+                      {s.course_code} · {s.answered_count}/{s.total_questions} answered
+                    </span>
+                    <div className="flex items-center gap-1.5 flex-shrink-0">
+                      <Camera className={`h-3.5 w-3.5 ${s.camera_status === 'ok' ? 'text-success-600' : 'text-neutral-400'}`} />
+                      <Mic className={`h-3.5 w-3.5 ${s.mic_status === 'ok' ? 'text-success-600' : 'text-neutral-400'}`} />
+                      <ScreenShare className={`h-3.5 w-3.5 ${s.screen_status === 'ok' ? 'text-success-600' : 'text-neutral-400'}`} />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <Button
+                      size="sm"
+                      fullWidth
+                      onClick={() => setMonitorSession(s)}
+                    >
+                      <Radio className="h-4 w-4" />
+                      Peek Live (Cam &amp; Mic)
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setReviewSessionId(s.id)}
+                      title="View activity timeline"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Stats */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
           {stats.map((stat) => (
@@ -959,15 +1064,16 @@ export default function TeacherDashboard({ user, onLogout }: TeacherDashboardPro
                         </td>
                         <td className="px-4 py-3">
                           {r.sessionId && (
-                            <div className="flex items-center justify-end gap-1">
+                            <div className="flex items-center justify-end gap-1.5">
                               {(r.uiStatus === 'in-progress' || r.uiStatus === 'disconnected') &&
                                 r.sessionObj && (
                                   <button
                                     onClick={() => setMonitorSession(r.sessionObj)}
-                                    className="p-2 rounded-lg text-brand-600 hover:bg-brand-50 transition-colors"
-                                    title="Watch live camera & screen stream"
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-brand-50 text-brand-700 hover:bg-brand-100 text-xs font-bold transition-colors"
+                                    title="Peek live camera, microphone & screen"
                                   >
-                                    <Radio className="h-4 w-4" />
+                                    <Radio className="h-3.5 w-3.5 text-brand-600 animate-pulse" />
+                                    Peek Live
                                   </button>
                                 )}
                               <button

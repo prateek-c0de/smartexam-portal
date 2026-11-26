@@ -476,6 +476,12 @@ export const examService = {
   // -------------------------------------------------------------------------
   // Teacher operations
   // -------------------------------------------------------------------------
+  async getLiveHallSessions(): Promise<TeacherSessionSummary[]> {
+    const { data, error } = await supabase.rpc('teacher_get_live_hall_sessions');
+    if (error) throw toAppError(error, 'Unable to load active examination sessions.');
+    return Array.isArray(data) ? (data as TeacherSessionSummary[]) : [];
+  },
+
   async getTeacherDashboard(examId?: string | null): Promise<TeacherDashboardPayload> {
     const { data, error } = await supabase.rpc('teacher_get_dashboard', {
       p_exam_id: examId ?? null,

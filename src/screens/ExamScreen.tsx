@@ -127,6 +127,8 @@ export default function ExamScreen({
   const [tabWarnings, setTabWarnings] = useState(session.proctoringFlags);
   const [latestFlagReason, setLatestFlagReason] = useState('');
   const [aiVisionReady, setAiVisionReady] = useState(false);
+  const [teacherSpeaking, setTeacherSpeaking] = useState(false);
+  const teacherAudioRef = useRef<HTMLAudioElement>(null);
   const [isOnline, setIsOnline] = useState<boolean>(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
@@ -492,6 +494,13 @@ export default function ExamScreen({
       getCameraStream: () => camStreamRef.current,
       getMicStream: () => micStreamRef.current,
       getScreenStream: () => screenStreamRef.current,
+      onTeacherVoiceState: (speaking) => setTeacherSpeaking(speaking),
+      onTeacherAudioStream: (stream) => {
+        if (teacherAudioRef.current) {
+          teacherAudioRef.current.srcObject = stream;
+          if (stream) void teacherAudioRef.current.play().catch(() => {});
+        }
+      },
     });
     webrtcRef.current = responder;
     responder.start();
@@ -517,6 +526,7 @@ export default function ExamScreen({
     void (async () => {
       await Promise.all([attachCamera(), attachMic()]);
       if (!cancelled) {
+        responder.notifyStreamsUpdated();
         await aiMonitor.start();
       }
     })();
@@ -790,6 +800,7 @@ export default function ExamScreen({
 
   return (
     <div className="min-h-screen bg-neutral-100 flex flex-col">
+      <audio ref={teacherAudioRef} autoPlay className="hidden" />
       {/* Exam top bar */}
       <header className="bg-white border-b border-neutral-200 px-4 py-3 flex items-center justify-between gap-3 sticky top-0 z-20">
         <div className="flex items-center gap-3 min-w-0">
@@ -824,6 +835,14 @@ export default function ExamScreen({
           <span className="hidden sm:inline">Submit</span>
         </Button>
       </header>
+
+      {/* Live instructor voice indicator */}
+      {teacherSpeaking && (
+        <div className="bg-brand-600 text-white px-4 py-2 flex items-center gap-2 text-sm font-semibold animate-fade-in">
+          <Mic className="h-4 w-4 animate-pulse flex-shrink-0" />
+          <span>Your instructor is speaking to you live via proctoring audio.</span>
+        </div>
+      )}
 
       {/* Live instructor warning banner */}
       {warnings.length > 0 && (

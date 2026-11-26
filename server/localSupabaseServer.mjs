@@ -282,8 +282,9 @@ export async function startLocalSupabaseServer(options = {}) {
                     table,
                     commit_timestamp: new Date().toISOString(),
                     type: eventType,
-                    new: newRow ?? {},
-                    old: {},
+                    columns: [],
+                    record: newRow ?? {},
+                    old_record: {},
                     errors: null,
                   },
                   ids: [bind.id ?? 1],
@@ -526,6 +527,29 @@ export async function startLocalSupabaseServer(options = {}) {
       }
     }
 
+    if (path === '/realtime/v1/api/broadcast' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const messages = Array.isArray(body?.messages) ? body.messages : [];
+      for (const m of messages) {
+        const fullTopic = String(m?.topic ?? '').startsWith('realtime:')
+          ? String(m.topic)
+          : `realtime:${m?.topic ?? ''}`;
+        const subs = topicSubscribers.get(fullTopic);
+        if (subs) {
+          const frame = JSON.stringify({
+            topic: fullTopic,
+            event: 'broadcast',
+            payload: { type: 'broadcast', event: m.event, payload: m.payload },
+            ref: null,
+          });
+          for (const sub of subs) {
+            if (sub.ws.readyState === 1) sub.ws.send(frame);
+          }
+        }
+      }
+      return sendJson(req, res, 202, { status: 'ok' });
+    }
+
     if (path.startsWith('/functions/v1/')) {
       return sendJson(req, res, 503, { error: 'Use local Ollama or deploy Supabase Edge Function' });
     }
@@ -575,15 +599,15 @@ export async function startLocalSupabaseServer(options = {}) {
         }
         const bareTopic = String(topic ?? '').replace(/^realtime:/, '');
 
-        // Enforce WebRTC channel authorization in PostgreSQL
-        if (bareTopic.startsWith('webrtc:')) {
+        // Enforce WebRTC / Peek channel authorization in PostgreSQL
+        if (bareTopic.startsWith('webrtc:') || bareTopic.startsWith('peek:')) {
           const allowed = await serializedDb(async () => {
             if (!socketUid) return false;
             await db.exec('BEGIN');
             try {
               await db.exec('SET LOCAL ROLE authenticated;');
               await db.query(`SELECT set_config('request.jwt.claim.sub', $1, true)`, [socketUid]);
-              const r = await db.query(`SELECT public.can_access_webrtc_channel($1) AS ok`, [bareTopic]);
+              const r = await db.query(`SELECT public.can_access_peek_channel($1) AS ok`, [bareTopic]);
               await db.exec('COMMIT');
               return Boolean(r.rows[0]?.ok);
             } catch {
@@ -621,7 +645,7 @@ export async function startLocalSupabaseServer(options = {}) {
             payload: {
               status: 'ok',
               response: {
-                postgres_changes: pgChangesCfg.map((c) => ({ id: c.id, event: c.event, schema: c.schema, table: c.table })),
+                postgres_changes: pgChangesCfg.map((c) => ({ ...c })),
               },
             },
             ref,

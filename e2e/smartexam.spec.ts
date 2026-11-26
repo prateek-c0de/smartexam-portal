@@ -382,4 +382,132 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
     expect(pageErrors).toEqual([]);
     await ctx.close();
   });
+
+  test('5. Student giving exam auto-registers on Teacher Portal and teacher Peeks live camera, microphone & recording', async ({
+    browser,
+  }) => {
+    const fxDir = join(process.cwd(), 'e2e', 'fixtures');
+    const oneFaceB64 = `data:image/jpeg;base64,${readFileSync(join(fxDir, 'one-face.jpg')).toString('base64')}`;
+
+    // 1. Teacher opens Teacher Portal BEFORE student starts exam (different faculty account from CS 401 owner!)
+    const teacherCtx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      permissions: ['camera', 'microphone'],
+    });
+    const teacherPage = await teacherCtx.newPage();
+    await teacherPage.goto('/');
+    await teacherPage.getByRole('button', { name: /Teacher Portal/i }).click();
+    await teacherPage.fill('input[type="email"]', 'proctor.live@college.edu');
+    await teacherPage.fill('input[type="password"]', 'Proctor#2026!');
+    await teacherPage.getByRole('button', { name: /Sign In as Teacher/i }).click();
+    await expect(teacherPage.getByRole('heading', { name: /Exam Management Dashboard/i })).toBeVisible();
+
+    // 2. Student signs in on a separate browser context with live camera + live microphone tone stream
+    const studentCtx = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      permissions: ['camera', 'microphone'],
+    });
+    const studentPage = await studentCtx.newPage();
+    await studentPage.addInitScript(
+      ({ initialSrc }) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 480;
+        const ctx2d = canvas.getContext('2d')!;
+        const img = new Image();
+        img.src = initialSrc;
+        setInterval(() => {
+          if (img.complete && img.naturalWidth > 0) {
+            ctx2d.drawImage(img, 0, 0, 640, 480);
+          }
+        }, 66);
+
+        let audioTrack: MediaStreamTrack | null = null;
+        function ensureMicTrack(): MediaStreamTrack {
+          if (audioTrack && audioTrack.readyState === 'live') return audioTrack;
+          const actx = new AudioContext();
+          const osc = actx.createOscillator();
+          const gain = actx.createGain();
+          gain.gain.value = 0.08;
+          const dest = actx.createMediaStreamDestination();
+          osc.frequency.value = 320;
+          osc.connect(gain);
+          gain.connect(dest);
+          osc.start();
+          audioTrack = dest.stream.getAudioTracks()[0];
+          return audioTrack;
+        }
+
+        navigator.mediaDevices.getUserMedia = async (constraints) => {
+          const out = new MediaStream();
+          if (constraints && typeof constraints === 'object' && constraints.video) {
+            canvas.captureStream(15).getVideoTracks().forEach((t) => out.addTrack(t));
+          }
+          if (constraints && typeof constraints === 'object' && constraints.audio) {
+            out.addTrack(ensureMicTrack().clone());
+          }
+          return out;
+        };
+        navigator.mediaDevices.getDisplayMedia = async () => canvas.captureStream(8);
+      },
+      { initialSrc: oneFaceB64 }
+    );
+
+    try {
+      await studentPage.goto('/');
+      await studentPage.getByRole('button', { name: /Student Portal/i }).click();
+      await studentPage.fill('input[type="email"]', 'live.student@college.edu');
+      await studentPage.fill('input[type="password"]', 'LiveStudent#99');
+      await studentPage.getByRole('button', { name: /Sign In as Student/i }).click();
+
+      await studentPage.fill('input[placeholder*="8-character"]', 'CS492FXN');
+      await studentPage.getByRole('button', { name: /Join Exam/i }).click();
+      await studentPage.getByRole('button', { name: /Begin Check-in/i }).first().click();
+
+      await studentPage.locator('input[type="checkbox"]').check();
+      await studentPage.getByRole('button', { name: /I Understand — Continue/i }).click();
+      await studentPage.getByRole('button', { name: /Continue/i }).click();
+      for (let i = 0; i < 3; i++) {
+        await studentPage.getByRole('button', { name: /Allow/i }).first().click();
+      }
+      await studentPage.getByRole('button', { name: /Continue to Camera Check/i }).click();
+      await expect(studentPage.getByText(/Face Presence Confirmed!/i)).toBeVisible({ timeout: 20000 });
+      await studentPage.getByRole('button', { name: /Start Exam/i }).click();
+      await expect(studentPage.getByText(/PROCTORING ACTIVE/i)).toBeVisible();
+
+      // 3. Without reloading Teacher Portal, the student automatically registers in Live Examination Hall!
+      await expect(teacherPage.getByText(/Live Examination Hall/i)).toBeVisible({ timeout: 12000 });
+      await expect(teacherPage.getByText('live.student@college.edu').first()).toBeVisible({ timeout: 12000 });
+
+      // 4. Teacher clicks "Peek Live (Cam & Mic)" to monitor live camera, microphone audio & record a clip
+      await teacherPage.getByRole('button', { name: /Peek Live \(Cam & Mic\)/i }).first().click();
+      await expect(teacherPage.getByRole('heading', { name: /Live Peek Monitor/i })).toBeVisible();
+      await expect(teacherPage.getByText(/Live Student Microphone Audio/i)).toBeVisible();
+      await expect(teacherPage.getByText(/Listening Live/i)).toBeVisible();
+      await expect(teacherPage.getByText(/Live Student Camera \(Connected\)/i)).toBeVisible({ timeout: 15000 });
+
+      // Record a short live camera + microphone clip if WebRTC stream connected
+      const recordBtn = teacherPage.getByRole('button', { name: /Record Clip/i });
+      if (await recordBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+        await recordBtn.click();
+        await teacherPage.waitForTimeout(1200);
+        await teacherPage.getByRole('button', { name: /Stop Rec/i }).click();
+        await expect(teacherPage.getByText(/Captured Camera & Microphone Recording/i)).toBeVisible();
+        await expect(teacherPage.getByRole('link', { name: /Download Recording/i })).toBeVisible();
+      }
+
+      // Send live proctor warning from Peek modal -> Student immediately receives banner on ExamScreen!
+      await teacherPage.fill(
+        'input[placeholder*="instant written warning"]',
+        'Please keep both hands visible on your desk.'
+      );
+      await teacherPage.getByRole('button', { name: /Send Warning/i }).click();
+      await expect(
+        studentPage.getByText(/Please keep both hands visible on your desk\./i)
+      ).toBeVisible({ timeout: 10000 });
+    } finally {
+      await studentCtx.close();
+      await teacherCtx.close();
+    }
+  });
 });

@@ -25,27 +25,46 @@ export function buildIceServers(): RTCIceServer[] {
     const username = String(import.meta.env.VITE_TURN_USERNAME ?? '').trim();
     const credential = String(import.meta.env.VITE_TURN_CREDENTIAL ?? '').trim();
     if (turnUrls.length > 0) {
-      servers.push(
-        username
-          ? { urls: turnUrls, username, credential }
-          : { urls: turnUrls }
-      );
+      servers.push(username ? { urls: turnUrls, username, credential } : { urls: turnUrls });
     }
   }
 
   return servers;
 }
 
+export interface LiveTelemetryPayload {
+  frameDataUrl: string | null;
+  screenDataUrl?: string | null;
+  micLevel: number; // 0..100
+  hasCam: boolean;
+  hasMic: boolean;
+  hasScreen: boolean;
+}
+
 interface SignalEnvelope {
-  type: 'watch-request' | 'watch-stop' | 'offer' | 'answer' | 'ice';
+  type:
+    | 'watch-request'
+    | 'watch-stop'
+    | 'offer'
+    | 'answer'
+    | 'ice'
+    | 'telemetry'
+    | 'teacher-voice'
+    | 'teacher-speaking';
   viewerId: string;
   sdp?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
   cameraStreamId?: string | null;
   screenStreamId?: string | null;
+  telemetry?: LiveTelemetryPayload;
+  audioDataUrl?: string;
+  speaking?: boolean;
 }
 
-async function applyAdaptiveEncoding(pc: RTCPeerConnection, screenTrackId?: string | null): Promise<void> {
+async function applyAdaptiveEncoding(
+  pc: RTCPeerConnection,
+  screenTrackId?: string | null
+): Promise<void> {
   for (const sender of pc.getSenders()) {
     if (!sender.track || sender.track.kind !== 'video') continue;
     try {
@@ -54,14 +73,11 @@ async function applyAdaptiveEncoding(pc: RTCPeerConnection, screenTrackId?: stri
         params.encodings = [{}];
       }
       const isScreen = sender.track.id === screenTrackId;
-      params.encodings[0].maxBitrate = isScreen ? 380_000 : 220_000;
+      params.encodings[0].maxBitrate = isScreen ? 380_000 : 260_000;
       params.encodings[0].maxFramerate = isScreen ? 8 : 15;
-      if (!isScreen) {
-        params.encodings[0].scaleResolutionDownBy = 1;
-      }
       await sender.setParameters(params);
     } catch {
-      // Browser may not support runtime encoding adjustments — safe to continue
+      // Non-fatal if browser ignores sender encoding updates
     }
   }
 }
@@ -70,6 +86,8 @@ export interface StudentMediaProvider {
   getCameraStream: () => MediaStream | null;
   getMicStream: () => MediaStream | null;
   getScreenStream: () => MediaStream | null;
+  onTeacherVoiceState?: (speaking: boolean) => void;
+  onTeacherAudioStream?: (stream: MediaStream | null) => void;
 }
 
 export class StudentWebRTCResponder {
@@ -77,18 +95,28 @@ export class StudentWebRTCResponder {
   private readonly provider: StudentMediaProvider;
   private channel: RealtimeChannel | null = null;
   private peers = new Map<string, RTCPeerConnection>();
+  private activeViewers = new Set<string>();
   private pendingIce = new Map<string, RTCIceCandidateInit[]>();
+  private telemetryTimer: number | null = null;
+  private snapCanvas: HTMLCanvasElement;
+  private audioCtx: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private audioSource: MediaStreamAudioSourceNode | null = null;
+  private boundMicId: string | null = null;
   private disposed = false;
 
   constructor(sessionId: string, provider: StudentMediaProvider) {
     this.sessionId = sessionId;
     this.provider = provider;
+    this.snapCanvas = document.createElement('canvas');
+    this.snapCanvas.width = 320;
+    this.snapCanvas.height = 240;
   }
 
   start(): void {
-    if (this.disposed || this.channel || typeof RTCPeerConnection === 'undefined') return;
+    if (this.disposed || this.channel) return;
 
-    const topic = `webrtc:${this.sessionId}`;
+    const topic = `peek:${this.sessionId}`;
     this.channel = supabase.channel(topic, {
       config: { broadcast: { self: false } },
     });
@@ -100,11 +128,128 @@ export class StudentWebRTCResponder {
       .subscribe();
   }
 
+  private ensureTelemetryLoop(): void {
+    if (this.telemetryTimer !== null || this.disposed) return;
+
+    const camVideo = document.createElement('video');
+    camVideo.muted = true;
+    camVideo.playsInline = true;
+
+    const scrVideo = document.createElement('video');
+    scrVideo.muted = true;
+    scrVideo.playsInline = true;
+
+    this.telemetryTimer = window.setInterval(() => {
+      if (this.disposed || this.activeViewers.size === 0 || !this.channel) {
+        if (this.activeViewers.size === 0 && this.telemetryTimer !== null) {
+          window.clearInterval(this.telemetryTimer);
+          this.telemetryTimer = null;
+        }
+        return;
+      }
+
+      const camStream = this.provider.getCameraStream();
+      const micStream = this.provider.getMicStream();
+      const scrStream = this.provider.getScreenStream();
+
+      let frameDataUrl: string | null = null;
+      if (camStream && camStream.getVideoTracks().some((t) => t.readyState === 'live')) {
+        if (camVideo.srcObject !== camStream) {
+          camVideo.srcObject = camStream;
+          void camVideo.play().catch(() => {});
+        }
+        if (camVideo.readyState >= 2 && camVideo.videoWidth > 0) {
+          const ctx = this.snapCanvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(camVideo, 0, 0, 320, 240);
+            frameDataUrl = this.snapCanvas.toDataURL('image/jpeg', 0.55);
+          }
+        }
+      }
+
+      let screenDataUrl: string | null = null;
+      if (scrStream && scrStream.getVideoTracks().some((t) => t.readyState === 'live')) {
+        if (scrVideo.srcObject !== scrStream) {
+          scrVideo.srcObject = scrStream;
+          void scrVideo.play().catch(() => {});
+        }
+        if (scrVideo.readyState >= 2 && scrVideo.videoWidth > 0) {
+          const ctx = this.snapCanvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(scrVideo, 0, 0, 320, 240);
+            screenDataUrl = this.snapCanvas.toDataURL('image/jpeg', 0.5);
+          }
+        }
+      }
+
+      const micLevel = this.readMicLevel(micStream);
+      const telemetry: LiveTelemetryPayload = {
+        frameDataUrl,
+        screenDataUrl,
+        micLevel,
+        hasCam: Boolean(camStream?.getVideoTracks().some((t) => t.readyState === 'live')),
+        hasMic: Boolean(micStream?.getAudioTracks().some((t) => t.readyState === 'live')),
+        hasScreen: Boolean(scrStream?.getVideoTracks().some((t) => t.readyState === 'live')),
+      };
+
+      for (const viewerId of this.activeViewers) {
+        void this.channel.send({
+          type: 'broadcast',
+          event: 'signal',
+          payload: {
+            type: 'telemetry',
+            viewerId,
+            telemetry,
+          } satisfies SignalEnvelope,
+        });
+      }
+    }, 750);
+  }
+
+  private readMicLevel(micStream: MediaStream | null): number {
+    if (!micStream || micStream.getAudioTracks().length === 0) return 0;
+    try {
+      if (this.boundMicId !== micStream.id || !this.analyser) {
+        this.audioSource?.disconnect();
+        if (!this.audioCtx) {
+          const Ctx =
+            window.AudioContext ||
+            (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          if (!Ctx) return 0;
+          this.audioCtx = new Ctx();
+        }
+        if (this.audioCtx.state === 'suspended') {
+          void this.audioCtx.resume().catch(() => {});
+        }
+        this.analyser = this.audioCtx.createAnalyser();
+        this.analyser.fftSize = 256;
+        this.audioSource = this.audioCtx.createMediaStreamSource(micStream);
+        this.audioSource.connect(this.analyser);
+        this.boundMicId = micStream.id;
+      }
+      const data = new Uint8Array(this.analyser.fftSize);
+      this.analyser.getByteTimeDomainData(data);
+      let sumSq = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / data.length);
+      return Math.min(100, Math.round(rms * 320));
+    } catch {
+      return 0;
+    }
+  }
+
   private async handleSignal(msg: SignalEnvelope): Promise<void> {
     if (this.disposed || !msg?.viewerId) return;
 
     if (msg.type === 'watch-request') {
-      await this.createOfferForViewer(msg.viewerId);
+      this.activeViewers.add(msg.viewerId);
+      this.ensureTelemetryLoop();
+      if (typeof RTCPeerConnection !== 'undefined') {
+        await this.createOfferForViewer(msg.viewerId);
+      }
     } else if (msg.type === 'answer' && msg.sdp) {
       const pc = this.peers.get(msg.viewerId);
       if (!pc) return;
@@ -116,7 +261,7 @@ export class StudentWebRTCResponder {
           await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
         }
       } catch {
-        // Ignore stale SDP answer
+        // Ignore stale SDP
       }
     } else if (msg.type === 'ice' && msg.candidate) {
       const pc = this.peers.get(msg.viewerId);
@@ -128,7 +273,18 @@ export class StudentWebRTCResponder {
         list.push(msg.candidate);
         this.pendingIce.set(msg.viewerId, list);
       }
+    } else if (msg.type === 'teacher-speaking') {
+      this.provider.onTeacherVoiceState?.(Boolean(msg.speaking));
+    } else if (msg.type === 'teacher-voice' && msg.audioDataUrl) {
+      try {
+        const audio = new Audio(msg.audioDataUrl);
+        void audio.play().catch(() => {});
+      } catch {
+        // Ignore playback block
+      }
     } else if (msg.type === 'watch-stop') {
+      this.activeViewers.delete(msg.viewerId);
+      this.provider.onTeacherVoiceState?.(false);
       this.closePeer(msg.viewerId);
     }
   }
@@ -137,6 +293,13 @@ export class StudentWebRTCResponder {
     this.closePeer(viewerId);
     const pc = new RTCPeerConnection({ iceServers: buildIceServers() });
     this.peers.set(viewerId, pc);
+
+    // Receive-capable audio transceiver so teacher push-to-talk WebRTC audio can also play directly
+    pc.ontrack = (ev) => {
+      if (ev.track.kind === 'audio' && ev.streams[0]) {
+        this.provider.onTeacherAudioStream?.(ev.streams[0]);
+      }
+    };
 
     const camMicBundle = new MediaStream();
     const camStream = this.provider.getCameraStream();
@@ -185,7 +348,7 @@ export class StudentWebRTCResponder {
     };
 
     try {
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
       await pc.setLocalDescription(offer);
       await applyAdaptiveEncoding(pc, screenVideoTrackId);
 
@@ -206,9 +369,10 @@ export class StudentWebRTCResponder {
   }
 
   notifyStreamsUpdated(): void {
-    // Re-negotiate for any currently connected teacher viewers when a stream recovers
-    for (const viewerId of Array.from(this.peers.keys())) {
-      void this.createOfferForViewer(viewerId);
+    for (const viewerId of Array.from(this.activeViewers)) {
+      if (typeof RTCPeerConnection !== 'undefined') {
+        void this.createOfferForViewer(viewerId);
+      }
     }
   }
 
@@ -218,6 +382,7 @@ export class StudentWebRTCResponder {
     this.pendingIce.delete(viewerId);
     if (pc) {
       try {
+        pc.ontrack = null;
         pc.onicecandidate = null;
         pc.onconnectionstatechange = null;
         pc.close();
@@ -229,9 +394,21 @@ export class StudentWebRTCResponder {
 
   dispose(): void {
     this.disposed = true;
+    if (this.telemetryTimer !== null) {
+      window.clearInterval(this.telemetryTimer);
+      this.telemetryTimer = null;
+    }
+    this.audioSource?.disconnect();
+    this.audioSource = null;
+    this.analyser = null;
+    if (this.audioCtx) {
+      void this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
+    }
     for (const viewerId of Array.from(this.peers.keys())) {
       this.closePeer(viewerId);
     }
+    this.activeViewers.clear();
     if (this.channel) {
       void supabase.removeChannel(this.channel);
       this.channel = null;
@@ -242,7 +419,8 @@ export class StudentWebRTCResponder {
 export interface TeacherViewerCallbacks {
   onCameraStream: (stream: MediaStream | null) => void;
   onScreenStream: (stream: MediaStream | null) => void;
-  onStateChange: (state: RTCPeerConnectionState | 'connecting' | 'disconnected') => void;
+  onTelemetry?: (telemetry: LiveTelemetryPayload) => void;
+  onStateChange: (state: RTCPeerConnectionState | 'connecting' | 'live-telemetry' | 'disconnected') => void;
 }
 
 export class TeacherWebRTCViewer {
@@ -254,6 +432,11 @@ export class TeacherWebRTCViewer {
   private pendingIce: RTCIceCandidateInit[] = [];
   private cameraStreamId: string | null = null;
   private screenStreamId: string | null = null;
+  private teacherMicStream: MediaStream | null = null;
+  private voiceRelayRecorder: MediaRecorder | null = null;
+  private voiceRelayInterval: number | null = null;
+  private handshakeInterval: number | null = null;
+  private receivedMediaOrTelemetry = false;
   private retryTimer: number | null = null;
   private disposed = false;
 
@@ -264,10 +447,10 @@ export class TeacherWebRTCViewer {
   }
 
   start(): void {
-    if (this.disposed || typeof RTCPeerConnection === 'undefined') return;
+    if (this.disposed) return;
     this.callbacks.onStateChange('connecting');
 
-    const topic = `webrtc:${this.sessionId}`;
+    const topic = `peek:${this.sessionId}`;
     this.channel = supabase.channel(topic, {
       config: { broadcast: { self: false } },
     });
@@ -279,13 +462,20 @@ export class TeacherWebRTCViewer {
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           this.requestStream();
+          if (this.handshakeInterval === null) {
+            this.handshakeInterval = window.setInterval(() => {
+              if (this.disposed) return;
+              if (!this.receivedMediaOrTelemetry) {
+                this.sendWatchRequest();
+              }
+            }, 1500);
+          }
         }
       });
   }
 
-  requestStream(): void {
+  private sendWatchRequest(): void {
     if (this.disposed || !this.channel) return;
-    this.callbacks.onStateChange('connecting');
     void this.channel.send({
       type: 'broadcast',
       event: 'signal',
@@ -296,10 +486,117 @@ export class TeacherWebRTCViewer {
     });
   }
 
+  requestStream(): void {
+    if (this.disposed || !this.channel) return;
+    this.receivedMediaOrTelemetry = false;
+    this.callbacks.onStateChange('connecting');
+    this.sendWatchRequest();
+  }
+
+  async startSpeakingToStudent(): Promise<boolean> {
+    if (this.disposed || !navigator.mediaDevices?.getUserMedia) return false;
+    try {
+      const mic = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      this.teacherMicStream = mic;
+      void this.channel?.send({
+        type: 'broadcast',
+        event: 'signal',
+        payload: {
+          type: 'teacher-speaking',
+          viewerId: this.viewerId,
+          speaking: true,
+        } satisfies SignalEnvelope,
+      });
+
+      // Relay short 900ms Opus audio chunks over Realtime so two-way teacher voice works
+      // reliably even without renegotiating WebRTC ICE across NATs!
+      if (typeof MediaRecorder !== 'undefined') {
+        const startChunk = () => {
+          if (!this.teacherMicStream || this.disposed) return;
+          const rec = new MediaRecorder(this.teacherMicStream);
+          this.voiceRelayRecorder = rec;
+          const parts: BlobPart[] = [];
+          rec.ondataavailable = (e) => {
+            if (e.data.size > 0) parts.push(e.data);
+          };
+          rec.onstop = () => {
+            if (parts.length === 0 || this.disposed) return;
+            const blob = new Blob(parts, { type: rec.mimeType || 'audio/webm' });
+            const reader = new FileReader();
+            reader.onloadend = () => {
+              if (typeof reader.result === 'string' && this.channel && !this.disposed) {
+                void this.channel.send({
+                  type: 'broadcast',
+                  event: 'signal',
+                  payload: {
+                    type: 'teacher-voice',
+                    viewerId: this.viewerId,
+                    audioDataUrl: reader.result,
+                  } satisfies SignalEnvelope,
+                });
+              }
+            };
+            reader.readAsDataURL(blob);
+          };
+          rec.start();
+          window.setTimeout(() => {
+            if (rec.state === 'recording') rec.stop();
+          }, 900);
+        };
+
+        startChunk();
+        this.voiceRelayInterval = window.setInterval(startChunk, 950);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  stopSpeakingToStudent(): void {
+    if (this.voiceRelayInterval !== null) {
+      window.clearInterval(this.voiceRelayInterval);
+      this.voiceRelayInterval = null;
+    }
+    if (this.voiceRelayRecorder && this.voiceRelayRecorder.state === 'recording') {
+      try {
+        this.voiceRelayRecorder.stop();
+      } catch {
+        // Ignore
+      }
+    }
+    this.voiceRelayRecorder = null;
+    if (this.teacherMicStream) {
+      this.teacherMicStream.getTracks().forEach((t) => t.stop());
+      this.teacherMicStream = null;
+    }
+    void this.channel?.send({
+      type: 'broadcast',
+      event: 'signal',
+      payload: {
+        type: 'teacher-speaking',
+        viewerId: this.viewerId,
+        speaking: false,
+      } satisfies SignalEnvelope,
+    });
+  }
+
   private async handleSignal(msg: SignalEnvelope): Promise<void> {
     if (this.disposed || msg.viewerId !== this.viewerId) return;
 
-    if (msg.type === 'offer' && msg.sdp) {
+    if (msg.type === 'telemetry' && msg.telemetry) {
+      this.receivedMediaOrTelemetry = true;
+      this.callbacks.onTelemetry?.(msg.telemetry);
+      if (!this.pc || this.pc.connectionState !== 'connected') {
+        this.callbacks.onStateChange('live-telemetry');
+      }
+      return;
+    }
+
+    if (msg.type === 'offer' && msg.sdp && typeof RTCPeerConnection !== 'undefined') {
+      this.receivedMediaOrTelemetry = true;
       this.closePeerOnly();
       this.cameraStreamId = msg.cameraStreamId ?? null;
       this.screenStreamId = msg.screenStreamId ?? null;
@@ -307,18 +604,35 @@ export class TeacherWebRTCViewer {
       const pc = new RTCPeerConnection({ iceServers: buildIceServers() });
       this.pc = pc;
 
+      const combinedCamMic = new MediaStream();
       let receivedVideoStreams = 0;
+
       pc.ontrack = (ev) => {
         const stream = ev.streams[0];
-        if (!stream) return;
-        if (this.screenStreamId && stream.id === this.screenStreamId) {
+        if (this.screenStreamId && stream && stream.id === this.screenStreamId) {
           this.callbacks.onScreenStream(stream);
-        } else if (this.cameraStreamId && stream.id === this.cameraStreamId) {
-          this.callbacks.onCameraStream(stream);
+          return;
+        }
+        if (ev.track.kind === 'audio') {
+          combinedCamMic.addTrack(ev.track);
+          this.callbacks.onCameraStream(combinedCamMic);
+          return;
+        }
+        if (this.cameraStreamId && stream && stream.id === this.cameraStreamId) {
+          stream.getTracks().forEach((t) => {
+            if (!combinedCamMic.getTracks().some((x) => x.id === t.id)) {
+              combinedCamMic.addTrack(t);
+            }
+          });
+          this.callbacks.onCameraStream(combinedCamMic);
         } else if (ev.track.kind === 'video') {
           receivedVideoStreams += 1;
-          if (receivedVideoStreams === 1) this.callbacks.onCameraStream(stream);
-          else this.callbacks.onScreenStream(stream);
+          if (receivedVideoStreams === 1) {
+            combinedCamMic.addTrack(ev.track);
+            this.callbacks.onCameraStream(combinedCamMic);
+          } else if (stream) {
+            this.callbacks.onScreenStream(stream);
+          }
         }
       };
 
@@ -395,6 +709,11 @@ export class TeacherWebRTCViewer {
 
   dispose(): void {
     this.disposed = true;
+    this.stopSpeakingToStudent();
+    if (this.handshakeInterval !== null) {
+      window.clearInterval(this.handshakeInterval);
+      this.handshakeInterval = null;
+    }
     if (this.retryTimer !== null) {
       window.clearTimeout(this.retryTimer);
       this.retryTimer = null;

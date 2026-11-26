@@ -10,3 +10,6 @@ await startLocalSupabaseServer({
 });
 
 console.log(`E2E PGlite Supabase server listening on http://127.0.0.1:${PORT}`);
+
+process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
