@@ -1,14 +1,20 @@
 import { createClient } from '@supabase/supabase-js';
 
+const DEFAULT_PUBLIC_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+  'eyJyb2xlIjoiYW5vbiIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoyMDAwMDAwMDAwfQ.' +
+  'smartexam-public-anon';
+
 const rawSupabaseUrl = String(import.meta.env.VITE_SUPABASE_URL ?? '').trim();
 const supabaseUrl =
+  rawSupabaseUrl === '' ||
   rawSupabaseUrl === 'local' ||
   (typeof window !== 'undefined' && /^https?:\/\/(127\.0\.0\.1|localhost):54321\b/i.test(rawSupabaseUrl))
     ? typeof window !== 'undefined'
       ? window.location.origin
       : 'http://127.0.0.1:54321'
     : rawSupabaseUrl;
-const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim();
+const supabaseAnonKey = String(import.meta.env.VITE_SUPABASE_ANON_KEY ?? '').trim() || DEFAULT_PUBLIC_ANON_KEY;
 
 export const isSupabaseConfigured =
   Boolean(supabaseUrl) &&

@@ -3,8 +3,8 @@
 
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 import { WebSocketServer } from 'ws';
@@ -48,9 +48,12 @@ function verifyPassword(password, stored) {
 }
 
 export async function startLocalSupabaseServer(options = {}) {
-  const port = Number(options.port ?? process.env.LOCAL_SUPABASE_PORT ?? 54321);
+  const port = Number(options.port ?? process.env.PORT ?? process.env.LOCAL_SUPABASE_PORT ?? 54321);
+  const host = options.host ?? (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
   const inMemory = Boolean(options.inMemory ?? process.env.IN_MEMORY_DB === '1');
-  const dataDir = inMemory ? null : resolve(PROJECT_ROOT, options.dataDir ?? '.smartexam-db');
+  const dataDir = inMemory ? null : resolve(PROJECT_ROOT, options.dataDir ?? process.env.DATA_DIR ?? '.smartexam-db');
+  const distDir = resolve(PROJECT_ROOT, 'dist');
+  const hasBuiltDist = existsSync(join(distDir, 'index.html'));
   const jwtSecret = getServerSecret(dataDir);
 
   if (dataDir) {
@@ -554,6 +557,89 @@ export async function startLocalSupabaseServer(options = {}) {
       return sendJson(req, res, 503, { error: 'Use local Ollama or deploy Supabase Edge Function' });
     }
 
+    if (path === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
+      return sendJson(req, res, 200, { status: 'ok' });
+    }
+
+    // Production static SPA + MediaPipe WASM/TFLite asset serving from `dist/`
+    if (
+      hasBuiltDist &&
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      !path.startsWith('/auth/v1') &&
+      !path.startsWith('/rest/v1') &&
+      !path.startsWith('/storage/v1') &&
+      !path.startsWith('/realtime/v1')
+    ) {
+      const MIME_TYPES = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'application/javascript; charset=utf-8',
+        '.mjs': 'application/javascript; charset=utf-8',
+        '.css': 'text/css; charset=utf-8',
+        '.json': 'application/json; charset=utf-8',
+        '.svg': 'image/svg+xml',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+        '.ico': 'image/x-icon',
+        '.wasm': 'application/wasm',
+        '.tflite': 'application/octet-stream',
+        '.woff2': 'font/woff2',
+        '.woff': 'font/woff',
+        '.ttf': 'font/ttf',
+      };
+
+      let decodedPath = '/';
+      try {
+        decodedPath = decodeURIComponent(path);
+      } catch {
+        decodedPath = '/';
+      }
+      const relPath = decodedPath.replace(/^\/+/, '');
+      const candidate = resolve(distDir, relPath);
+
+      if (!candidate.startsWith(distDir)) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
+      }
+
+      let fileToServe = null;
+      let isSpaIndex = false;
+      if (relPath && existsSync(candidate) && statSync(candidate).isFile()) {
+        fileToServe = candidate;
+      } else if (!relPath || !extname(relPath)) {
+        fileToServe = join(distDir, 'index.html');
+        isSpaIndex = true;
+      }
+
+      if (fileToServe) {
+        const ext = extname(fileToServe).toLowerCase();
+        const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+        const isImmutableAsset =
+          !isSpaIndex && (decodedPath.startsWith('/assets/') || decodedPath.startsWith('/mediapipe/'));
+        const bodyBuf = readFileSync(fileToServe);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Content-Length': bodyBuf.length,
+          'Cache-Control': isImmutableAsset
+            ? 'public, max-age=31536000, immutable'
+            : 'no-cache',
+          'X-Content-Type-Options': 'nosniff',
+          'X-Frame-Options': 'DENY',
+          'Referrer-Policy': 'strict-origin-when-cross-origin',
+          'Permissions-Policy':
+            'camera=(self), microphone=(self), display-capture=(self), fullscreen=(self), geolocation=()',
+        });
+        if (req.method === 'HEAD') {
+          res.end();
+        } else {
+          res.end(bodyBuf);
+        }
+        return;
+      }
+    }
+
     sendJson(req, res, 200, []);
   });
 
@@ -693,14 +779,15 @@ export async function startLocalSupabaseServer(options = {}) {
         rejectPromise(err);
       }
     });
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       resolvePromise();
     });
   });
 
   return {
     port,
-    url: `http://127.0.0.1:${port}`,
+    host,
+    url: `http://${host === '0.0.0.0' ? '127.0.0.1' : host}:${port}`,
     close: async () => {
       wss.close();
       await new Promise((r) => server.close(() => r()));
@@ -709,12 +796,13 @@ export async function startLocalSupabaseServer(options = {}) {
   };
 }
 
-// Allow standalone CLI execution (`node server/localSupabaseServer.mjs`)
+// Allow standalone CLI execution (`node server/localSupabaseServer.mjs` / `npm start`)
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const inMemory = process.env.IN_MEMORY_DB === '1';
-  const port = Number(process.env.LOCAL_SUPABASE_PORT || process.env.TEST_SUPABASE_PORT || 54321);
-  const seedTestAccounts = process.env.SEED_TEST_ACCOUNTS === '1';
-  startLocalSupabaseServer({ port, inMemory, seedTestAccounts }).then((srv) => {
-    console.log(`[SmartExam Backend] Persistent PostgreSQL + Auth + Realtime listening at ${srv.url}`);
+  const port = Number(process.env.PORT || process.env.LOCAL_SUPABASE_PORT || process.env.TEST_SUPABASE_PORT || 54321);
+  const host = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+  const seedTestAccounts = process.env.SEED_TEST_ACCOUNTS !== '0';
+  startLocalSupabaseServer({ port, host, inMemory, seedTestAccounts }).then((srv) => {
+    console.log(`[SmartExam Server] Full-Stack Portal + PostgreSQL + Auth + Realtime listening on ${host}:${srv.port}`);
   });
 }
