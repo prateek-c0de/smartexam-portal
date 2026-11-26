@@ -493,6 +493,7 @@ test.describe('SmartExam Full-Stack E2E, Security, Offline Recovery & Visual Reg
         await teacherPage.waitForTimeout(1200);
         await teacherPage.getByRole('button', { name: /Stop Rec/i }).click();
         await expect(teacherPage.getByText(/Captured Camera & Microphone Recording/i)).toBeVisible();
+        await expect(teacherPage.getByText(/Saved to Cloud Storage/i)).toBeVisible({ timeout: 10000 });
         await expect(teacherPage.getByRole('link', { name: /Download Recording/i })).toBeVisible();
       }
 

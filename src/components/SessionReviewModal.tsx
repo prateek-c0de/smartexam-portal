@@ -1,6 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
 import Button from '@/components/Button';
-import { examService, type TeacherSessionDetail } from '@/services/examService';
+import {
+  examService,
+  type ProctoringRecordingRow,
+  type TeacherSessionDetail,
+} from '@/services/examService';
 import { formatTime } from '@/utils/permissions';
 import {
   X,
@@ -13,6 +17,8 @@ import {
   Image as ImageIcon,
   Check,
   Ban,
+  Cloud,
+  Video,
 } from 'lucide-react';
 
 interface SessionReviewModalProps {
@@ -34,12 +40,17 @@ export default function SessionReviewModal({
   const [savingId, setSavingId] = useState<string | null>(null);
   const [warningMsg, setWarningMsg] = useState('');
   const [evidenceUrls, setEvidenceUrls] = useState<Record<string, string>>({});
+  const [recordings, setRecordings] = useState<ProctoringRecordingRow[]>([]);
 
   const loadDetail = useCallback(async () => {
     setLoading(true);
     try {
-      const d = await examService.getSessionDetail(sessionId);
+      const [d, recs] = await Promise.all([
+        examService.getSessionDetail(sessionId),
+        examService.listSessionRecordings(sessionId).catch(() => [] as ProctoringRecordingRow[]),
+      ]);
       setDetail(d);
+      setRecordings(recs);
       const rMap: Record<string, string> = {};
       for (const ev of d.events) {
         rMap[ev.id] = ev.teacher_remarks ?? '';
@@ -207,6 +218,42 @@ export default function SessionReviewModal({
                         Warn Student
                       </Button>
                     </form>
+                  )}
+
+                  {recordings.length > 0 && (
+                    <div className="p-4 rounded-xl bg-brand-50/50 border border-brand-200 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Cloud className="h-4 w-4 text-brand-600" />
+                        <span className="text-xs font-bold text-brand-900 uppercase tracking-wide">
+                          Cloud Camera & Microphone Recordings ({recordings.length})
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {recordings.map((rec) => (
+                          <div
+                            key={rec.id}
+                            className="p-3 rounded-xl bg-white border border-neutral-200 space-y-2"
+                          >
+                            <div className="flex items-center justify-between text-xs text-neutral-600">
+                              <span className="inline-flex items-center gap-1 font-semibold text-neutral-800">
+                                <Video className="h-3.5 w-3.5 text-brand-600" />
+                                {new Date(rec.created_at).toLocaleString()}
+                              </span>
+                              <span>
+                                {rec.duration_seconds}s · {Math.max(1, Math.round(rec.size_bytes / 1024))} KB
+                              </span>
+                            </div>
+                            {rec.signedUrl && (
+                              <video
+                                src={rec.signedUrl}
+                                controls
+                                className="w-full max-h-40 rounded-lg bg-neutral-900"
+                              />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {detail.events.length === 0 ? (

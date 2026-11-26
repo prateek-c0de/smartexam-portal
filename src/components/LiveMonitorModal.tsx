@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import Button from '@/components/Button';
 import { TeacherWebRTCViewer, type LiveTelemetryPayload } from '@/services/webrtcService';
-import { examService, type TeacherSessionSummary } from '@/services/examService';
+import {
+  examService,
+  type ProctoringRecordingRow,
+  type TeacherSessionSummary,
+} from '@/services/examService';
 import {
   X,
   Camera,
@@ -17,6 +21,8 @@ import {
   CircleDot,
   Square,
   Download,
+  Cloud,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface LiveMonitorModalProps {
@@ -45,10 +51,21 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
   // Two-way teacher voice ("Speak to Student")
   const [speakingToStudent, setSpeakingToStudent] = useState(false);
 
-  // On-demand camera + microphone clip recording & inline playback
+  // On-demand camera + microphone clip recording & permanent Cloud Storage sync
   const [isRecordingClip, setIsRecordingClip] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const recordingSecondsRef = useRef(0);
   const [recordedClipUrl, setRecordedClipUrl] = useState<string | null>(null);
+  const [uploadingCloud, setUploadingCloud] = useState(false);
+  const [cloudSaved, setCloudSaved] = useState(false);
+  const [cloudRecordings, setCloudRecordings] = useState<ProctoringRecordingRow[]>([]);
+
+  useEffect(() => {
+    examService
+      .listSessionRecordings(session.id)
+      .then((list) => setCloudRecordings(list))
+      .catch(() => {});
+  }, [session.id]);
 
   const [warningText, setWarningText] = useState('');
   const [sendingWarn, setSendingWarn] = useState(false);
@@ -156,7 +173,13 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
   // Recording duration counter
   useEffect(() => {
     if (!isRecordingClip) return;
-    const id = window.setInterval(() => setRecordingSeconds((s) => s + 1), 1000);
+    const id = window.setInterval(() => {
+      setRecordingSeconds((s) => {
+        const next = s + 1;
+        recordingSecondsRef.current = next;
+        return next;
+      });
+    }, 1000);
     return () => window.clearInterval(id);
   }, [isRecordingClip]);
 
@@ -192,6 +215,8 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
 
     clipChunksRef.current = [];
     setRecordingSeconds(0);
+    recordingSecondsRef.current = 0;
+    setCloudSaved(false);
     try {
       const recorder = new MediaRecorder(stream);
       clipRecorderRef.current = recorder;
@@ -204,6 +229,21 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
             type: recorder.mimeType || 'video/webm',
           });
           setRecordedClipUrl(URL.createObjectURL(blob));
+          setUploadingCloud(true);
+          void examService
+            .uploadProctoringRecording({
+              examId: session.exam_id,
+              sessionId: session.id,
+              blob,
+              durationSeconds: Math.max(1, recordingSecondsRef.current),
+            })
+            .then((saved) => {
+              if (saved) {
+                setCloudSaved(true);
+                setCloudRecordings((prev) => [saved, ...prev.filter((r) => r.id !== saved.id)]);
+              }
+            })
+            .finally(() => setUploadingCloud(false));
         }
       };
       recorder.start(500);
@@ -451,9 +491,22 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
           {recordedClipUrl && (
             <div className="p-4 rounded-xl bg-brand-50/60 border border-brand-200 space-y-3">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <span className="text-xs font-bold text-brand-900 uppercase tracking-wide">
-                  Captured Camera & Microphone Recording
-                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-brand-900 uppercase tracking-wide">
+                    Captured Camera & Microphone Recording
+                  </span>
+                  {uploadingCloud ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-100 text-brand-700 text-[11px] font-semibold">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Saving to Cloud Storage…
+                    </span>
+                  ) : cloudSaved ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-success-50 text-success-700 text-[11px] font-semibold">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Saved to Cloud Storage
+                    </span>
+                  ) : null}
+                </div>
                 <a
                   href={recordedClipUrl}
                   download={`proctor-recording-${session.student_name.replace(/\s+/g, '_')}-${Date.now()}.webm`}
@@ -468,6 +521,45 @@ export default function LiveMonitorModal({ session, onClose }: LiveMonitorModalP
                 controls
                 className="w-full max-h-56 rounded-lg bg-neutral-900"
               />
+            </div>
+          )}
+
+          {/* Previously Saved Cloud Storage Recordings */}
+          {cloudRecordings.length > 0 && (
+            <div className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <Cloud className="h-4 w-4 text-brand-600" />
+                <span className="text-xs font-bold text-neutral-700 uppercase tracking-wide">
+                  Cloud Storage Recordings ({cloudRecordings.length})
+                </span>
+              </div>
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {cloudRecordings.map((rec) => (
+                  <div
+                    key={rec.id}
+                    className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between gap-3 flex-wrap text-xs"
+                  >
+                    <div className="text-neutral-700">
+                      <span className="font-semibold">
+                        {new Date(rec.created_at).toLocaleTimeString()}
+                      </span>{' '}
+                      · {rec.duration_seconds}s · {Math.max(1, Math.round(rec.size_bytes / 1024))} KB
+                    </div>
+                    {rec.signedUrl && (
+                      <a
+                        href={rec.signedUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        download
+                        className="inline-flex items-center gap-1 font-semibold text-brand-600 hover:text-brand-700"
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Open / Download from Cloud
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

@@ -170,8 +170,37 @@ export const authService = {
       const errCode = String((error as { code?: string } | null)?.code ?? '');
       const msg = error?.message ?? '';
 
-      // First-time sign-in for a brand-new email: bind this email permanently to this password & portal role
-      if (errCode === 'user_not_found' || /user account not found/i.test(msg)) {
+      // First-time sign-in check: if this email has never been registered, bind it permanently
+      // to this password & portal role (works on both Supabase Cloud and local PGlite).
+      let provData: { created?: boolean; exists?: boolean; mode?: string } | null = null;
+      try {
+        const provRes = await supabase.rpc('provision_portal_account', {
+          p_email: normalizedEmail,
+          p_password: password,
+          p_full_name: deriveNameFromEmail(normalizedEmail, expectedRole),
+          p_portal_role: expectedRole,
+        });
+        provData = (provRes.data as { created?: boolean; exists?: boolean; mode?: string } | null) ?? null;
+      } catch {
+        provData = null;
+      }
+
+      if (provData?.created) {
+        const { data: retryData, error: retryErr } = await supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        });
+        if (retryErr || !retryData.user) {
+          recordLoginFailure(normalizedEmail);
+          throw new AppError(
+            'INVALID_CREDENTIALS',
+            retryErr?.message || 'Unable to sign in. Please verify your email and password.'
+          );
+        }
+      } else if (
+        !provData?.exists &&
+        (provData?.mode === 'local_signup' || errCode === 'user_not_found' || /user account not found/i.test(msg))
+      ) {
         const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
           email: normalizedEmail,
           password,

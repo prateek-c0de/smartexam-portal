@@ -113,6 +113,19 @@ export interface TeacherDashboardPayload {
   }>;
 }
 
+export interface ProctoringRecordingRow {
+  id: string;
+  session_id: string;
+  exam_id: string;
+  recorded_by: string | null;
+  storage_path: string;
+  mime_type: string;
+  duration_seconds: number;
+  size_bytes: number;
+  created_at: string;
+  signedUrl?: string | null;
+}
+
 export interface TeacherSessionDetail {
   session: TeacherSessionSummary;
   exam: TeacherExamRow;
@@ -617,5 +630,64 @@ export const examService = {
       .createSignedUrl(evidencePath, 120); // Short-lived 120-second signed URL
     if (error || !data?.signedUrl) return null;
     return data.signedUrl;
+  },
+
+  async uploadProctoringRecording(params: {
+    examId: string;
+    sessionId: string;
+    blob: Blob;
+    durationSeconds: number;
+  }): Promise<ProctoringRecordingRow | null> {
+    if (params.blob.size === 0 || params.blob.size > 50 * 1024 * 1024) {
+      return null;
+    }
+    const rawType = (params.blob.type || 'video/webm').split(';')[0].trim();
+    const mimeType = ['video/webm', 'audio/webm', 'video/mp4'].includes(rawType)
+      ? rawType
+      : 'video/webm';
+    const ext = mimeType === 'video/mp4' ? 'mp4' : 'webm';
+    const path = `${params.examId}/${params.sessionId}/rec-${Date.now()}-${safeRandomUUID().slice(0, 8)}.${ext}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from('proctoring-recordings')
+      .upload(path, params.blob, {
+        contentType: mimeType,
+        upsert: false,
+      });
+    if (uploadErr) return null;
+
+    const { data, error } = await supabase.rpc('teacher_register_recording', {
+      p_session_id: params.sessionId,
+      p_storage_path: path,
+      p_mime_type: mimeType,
+      p_duration_seconds: Math.max(1, Math.round(params.durationSeconds)),
+      p_size_bytes: params.blob.size,
+    });
+    if (error || !data) return null;
+
+    const { data: signed } = await supabase.storage
+      .from('proctoring-recordings')
+      .createSignedUrl(path, 3600);
+
+    return {
+      ...(data as ProctoringRecordingRow),
+      signedUrl: signed?.signedUrl ?? null,
+    };
+  },
+
+  async listSessionRecordings(sessionId: string): Promise<ProctoringRecordingRow[]> {
+    const { data, error } = await supabase.rpc('teacher_list_session_recordings', {
+      p_session_id: sessionId,
+    });
+    if (error || !Array.isArray(data)) return [];
+    const rows = data as ProctoringRecordingRow[];
+    return Promise.all(
+      rows.map(async (r) => {
+        const { data: signed } = await supabase.storage
+          .from('proctoring-recordings')
+          .createSignedUrl(r.storage_path, 3600);
+        return { ...r, signedUrl: signed?.signedUrl ?? null };
+      })
+    );
   },
 };

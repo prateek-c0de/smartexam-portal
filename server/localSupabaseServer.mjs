@@ -55,10 +55,12 @@ export async function startLocalSupabaseServer(options = {}) {
   const distDir = resolve(PROJECT_ROOT, 'dist');
   const hasBuiltDist = existsSync(join(distDir, 'index.html'));
   const jwtSecret = getServerSecret(dataDir);
+  const memoryBlobs = new Map();
 
   if (dataDir) {
     mkdirSync(join(dataDir, 'pgdata'), { recursive: true });
     mkdirSync(join(dataDir, 'evidence'), { recursive: true });
+    mkdirSync(join(dataDir, 'recordings'), { recursive: true });
   }
 
   const db = inMemory ? new PGlite() : new PGlite(join(dataDir, 'pgdata'));
@@ -413,47 +415,86 @@ export async function startLocalSupabaseServer(options = {}) {
       return sendJson(req, res, 200, { status: 'ok' });
     }
 
-    // --- Private Evidence Storage endpoints ---
-    if (path.startsWith('/storage/v1/object/proctoring-evidence/') && req.method === 'POST') {
-      const uid = decodeUidFromAuthHeader(req.headers.authorization);
-      if (!uid || !dataDir) return sendJson(req, res, 401, { message: 'Unauthorized' });
-      const rel = path.slice('/storage/v1/object/proctoring-evidence/'.length);
-      if (rel.includes('..')) return sendJson(req, res, 400, { message: 'Invalid path' });
-      const buf = await readRawBuffer(req);
-      if (buf.length > 524288) return sendJson(req, res, 413, { message: 'File too large' });
-      const dest = join(dataDir, 'evidence', rel);
-      mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, buf);
-      return sendJson(req, res, 200, { Key: `proctoring-evidence/${rel}` });
-    }
-
-    if (path.startsWith('/storage/v1/object/sign/proctoring-evidence/') && req.method === 'POST') {
+    // --- Private Evidence & Recording Storage endpoints ---
+    if (
+      (path.startsWith('/storage/v1/object/proctoring-evidence/') ||
+        path.startsWith('/storage/v1/object/proctoring-recordings/')) &&
+      req.method === 'POST'
+    ) {
       const uid = decodeUidFromAuthHeader(req.headers.authorization);
       if (!uid) return sendJson(req, res, 401, { message: 'Unauthorized' });
-      const rel = path.slice('/storage/v1/object/sign/proctoring-evidence/'.length);
-      const exp = Math.floor(Date.now() / 1000) + 120;
-      const sig = crypto.createHmac('sha256', jwtSecret).update(`${rel}:${exp}`).digest('hex');
+      const isRec = path.startsWith('/storage/v1/object/proctoring-recordings/');
+      const bucket = isRec ? 'proctoring-recordings' : 'proctoring-evidence';
+      const subDir = isRec ? 'recordings' : 'evidence';
+      const maxSize = isRec ? 52428800 : 524288;
+      const rel = path.slice(`/storage/v1/object/${bucket}/`.length);
+      if (rel.includes('..')) return sendJson(req, res, 400, { message: 'Invalid path' });
+      const buf = await readRawBuffer(req);
+      if (buf.length > maxSize) return sendJson(req, res, 413, { message: 'File too large' });
+      if (dataDir) {
+        const dest = join(dataDir, subDir, rel);
+        mkdirSync(dirname(dest), { recursive: true });
+        writeFileSync(dest, buf);
+      } else {
+        memoryBlobs.set(`${bucket}/${rel}`, buf);
+      }
+      return sendJson(req, res, 200, { Key: `${bucket}/${rel}` });
+    }
+
+    if (
+      (path.startsWith('/storage/v1/object/sign/proctoring-evidence/') ||
+        path.startsWith('/storage/v1/object/sign/proctoring-recordings/')) &&
+      req.method === 'POST'
+    ) {
+      const uid = decodeUidFromAuthHeader(req.headers.authorization);
+      if (!uid) return sendJson(req, res, 401, { message: 'Unauthorized' });
+      const isRec = path.startsWith('/storage/v1/object/sign/proctoring-recordings/');
+      const bucket = isRec ? 'proctoring-recordings' : 'proctoring-evidence';
+      const rel = path.slice(`/storage/v1/object/sign/${bucket}/`.length);
+      const ttl = isRec ? 3600 : 120;
+      const exp = Math.floor(Date.now() / 1000) + ttl;
+      const sig = crypto.createHmac('sha256', jwtSecret).update(`${bucket}:${rel}:${exp}`).digest('hex');
       return sendJson(req, res, 200, {
-        signedURL: `/object/sign/proctoring-evidence/${rel}?exp=${exp}&sig=${sig}`,
+        signedURL: `/object/sign/${bucket}/${rel}?exp=${exp}&sig=${sig}`,
       });
     }
 
-    if (path.startsWith('/storage/v1/object/sign/proctoring-evidence/') && req.method === 'GET') {
-      if (!dataDir) return sendJson(req, res, 404, {});
-      const rel = path.slice('/storage/v1/object/sign/proctoring-evidence/'.length);
+    if (
+      (path.startsWith('/storage/v1/object/sign/proctoring-evidence/') ||
+        path.startsWith('/storage/v1/object/sign/proctoring-recordings/')) &&
+      req.method === 'GET'
+    ) {
+      const isRec = path.startsWith('/storage/v1/object/sign/proctoring-recordings/');
+      const bucket = isRec ? 'proctoring-recordings' : 'proctoring-evidence';
+      const subDir = isRec ? 'recordings' : 'evidence';
+      const rel = path.slice(`/storage/v1/object/sign/${bucket}/`.length);
       const exp = Number(url.searchParams.get('exp') || 0);
       const sig = String(url.searchParams.get('sig') || '');
-      const expected = crypto.createHmac('sha256', jwtSecret).update(`${rel}:${exp}`).digest('hex');
+      const expected = crypto.createHmac('sha256', jwtSecret).update(`${bucket}:${rel}:${exp}`).digest('hex');
       if (exp < Math.floor(Date.now() / 1000) || sig !== expected || rel.includes('..')) {
         return sendJson(req, res, 403, { message: 'Signed URL expired' });
       }
-      const file = join(dataDir, 'evidence', rel);
-      if (!existsSync(file)) return sendJson(req, res, 404, {});
+      let outBuf = null;
+      if (dataDir) {
+        const file = join(dataDir, subDir, rel);
+        if (existsSync(file)) outBuf = readFileSync(file);
+      } else {
+        outBuf = memoryBlobs.get(`${bucket}/${rel}`) ?? null;
+      }
+      if (!outBuf) return sendJson(req, res, 404, {});
+      const contentType = rel.endsWith('.mp4')
+        ? 'video/mp4'
+        : rel.endsWith('.webm')
+          ? 'video/webm'
+          : rel.endsWith('.webp')
+            ? 'image/webp'
+            : 'image/jpeg';
       res.writeHead(200, {
-        'Content-Type': rel.endsWith('.webp') ? 'image/webp' : 'image/jpeg',
+        'Content-Type': contentType,
+        'Content-Length': outBuf.length,
         ...corsHeadersFor(req),
       });
-      res.end(readFileSync(file));
+      res.end(outBuf);
       return;
     }
 
